@@ -1,15 +1,21 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.4;
+pragma solidity ^0.8.21;
+
+import {ED256} from "@solarity/solidity-lib/libs/crypto/ED256.sol";
 
 interface IZKMultisigFactory {
+    error InvalidImplementationOrVerifier();
+
     event ZKMultisigCreated(
         address indexed zkMultisigAddress,
-        uint256[] initialParticipants,
+        ED256.APoint[] initialParticipantsPerm,
+        ED256.APoint[] initialParticipantsRot,
         uint256 initialQuorumPercentage
     );
 
     function createMultisig(
-        uint256[] calldata participants_,
+        ED256.APoint[] calldata permanentKeys_,
+        ED256.APoint[] calldata rotationKeys_,
         uint256 quorumPercentage_,
         uint256 salt_
     ) external returns (address);

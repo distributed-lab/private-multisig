@@ -2,103 +2,110 @@ import { PRECISION, ZERO_ADDR } from "@/scripts/utils/constants";
 import { Reverter } from "@/test/helpers/reverter";
 import {
   IZKMultisig,
-  NegativeVerifierMock,
-  PositiveVerifierMock,
-  ZKMultisig,
-  ZKMultisig__factory,
+  ProposalCreationGroth16Verifier,
+  VotingGroth16Verifier,
+  ZKMultisigMock,
   ZKMultisigFactory,
 } from "@ethers-v6";
 import { SignerWithAddress } from "@nomicfoundation/hardhat-ethers/signers";
 import { expect } from "chai";
-import { randomBytes } from "crypto";
-import { AbiCoder, BytesLike } from "ethers";
 import { ethers } from "hardhat";
-import { getPoseidon } from "./helpers";
-
-type ZKParams = IZKMultisig.ZKParamsStruct;
+import { getPoseidon, poseidonHash } from "./helpers";
+import { addPoint, mulPointEscalar } from "@zk-kit/baby-jubjub";
+import { zkit } from "hardhat";
+import { ProposalCreation } from "@zkit";
+import { ED256 } from "@/generated-types/ethers/contracts/libs/BabyJubJub";
+import APointStruct = ED256.APointStruct;
+import { CartesianMerkleTree } from "@/generated-types/ethers/contracts/ZKMultisig";
+import ProofStructOutput = CartesianMerkleTree.ProofStructOutput;
+import {
+  aggregateDecryptionKeyShares,
+  aggregatePoints,
+  aggregateVotes,
+  arrayToPoints,
+  createProposal,
+  encodePoint,
+  generateParticipants,
+  getBlinder,
+  getCumulativeKeys,
+  numberToArray,
+  parseNumberToBitsArray,
+  pointsToArray,
+  randomNumber,
+  vote,
+} from "@/test/helpers/zk-multisig";
 type ProposalContent = IZKMultisig.ProposalContentStruct;
 
 enum ProposalStatus {
   NONE,
   VOTING,
   ACCEPTED,
-  EXPIRED,
+  REJECTED,
   EXECUTED,
 }
 
 describe("ZKMultisig", () => {
   const reverter = new Reverter();
-  const randomNumber = () => BigInt("0x" + randomBytes(32).toString("hex"));
 
   const MIN_QUORUM = BigInt(80) * PRECISION;
-  const DAY_IN_SECONDS = 60 * 60 * 24;
+
+  const proofSize = 20;
+
+  const randomZKParams = {
+    a: [randomNumber(), randomNumber()],
+    b: [
+      [randomNumber(), randomNumber()],
+      [randomNumber(), randomNumber()],
+    ],
+    c: [randomNumber(), randomNumber()],
+    inputs: [randomNumber(), randomNumber()],
+  };
 
   let alice: SignerWithAddress;
 
-  let positiveParticipantVerifier: PositiveVerifierMock;
-  let negativeParticipantVerifier: NegativeVerifierMock;
+  let creationVerifier: ProposalCreationGroth16Verifier;
+  let votingVerifier: VotingGroth16Verifier;
 
-  let zkMultisig: ZKMultisig;
+  let zkMultisig: ZKMultisigMock;
   let zkMultisigFactory: ZKMultisigFactory;
 
-  let initialParticipants: bigint[];
-
-  let zkParams: ZKParams;
+  let initialParticipantsPerm: APointStruct[];
+  let initialParticipantsRot: APointStruct[];
 
   let proposalContent: ProposalContent;
-
-  const encode = (types: ReadonlyArray<string>, values: ReadonlyArray<any>): string => {
-    return AbiCoder.defaultAbiCoder().encode(types, values);
-  };
-
-  const generateParticipants = (length: number) => {
-    const participants: bigint[] = [];
-    for (let i = 0; i < length; i++) {
-      participants.push(randomNumber());
-    }
-
-    return participants;
-  };
 
   before(async () => {
     [alice] = await ethers.getSigners();
 
-    const positiveVerifier__factory = await ethers.getContractFactory("PositiveVerifierMock");
-    positiveParticipantVerifier = await positiveVerifier__factory.deploy();
+    creationVerifier = await ethers.deployContract("ProposalCreationGroth16Verifier");
+    votingVerifier = await ethers.deployContract("VotingGroth16Verifier");
 
-    await positiveParticipantVerifier.waitForDeployment();
-
-    const negativeVerifier__factory = await ethers.getContractFactory("NegativeVerifierMock");
-    negativeParticipantVerifier = await negativeVerifier__factory.deploy();
-
-    await negativeParticipantVerifier.waitForDeployment();
-
-    const zkMultisig__factory = await ethers.getContractFactory("ZKMultisig", {
+    const zkMultisigImpl = await ethers.deployContract("ZKMultisigMock", {
       libraries: {
         PoseidonUnit1L: await (await getPoseidon(1)).getAddress(),
+        PoseidonUnit3L: await (await getPoseidon(3)).getAddress(),
       },
     });
-    const zkMultisigImpl = await zkMultisig__factory.deploy();
 
-    await zkMultisigImpl.waitForDeployment();
+    zkMultisigFactory = await ethers.deployContract("ZKMultisigFactory");
 
-    const zkMultisigFactory__factory = await ethers.getContractFactory("ZKMultisigFactory");
-    zkMultisigFactory = await zkMultisigFactory__factory.deploy(
+    await zkMultisigFactory.initialize(
       await zkMultisigImpl.getAddress(),
-      await positiveParticipantVerifier.getAddress(),
+      await creationVerifier.getAddress(),
+      await votingVerifier.getAddress(),
     );
 
-    await zkMultisigFactory.waitForDeployment();
-
     const salt = randomNumber();
-    initialParticipants = generateParticipants(5);
+    [initialParticipantsPerm, initialParticipantsRot] = generateParticipants(5);
 
     // create multisig
-    await zkMultisigFactory.connect(alice).createMultisig(initialParticipants, MIN_QUORUM, salt);
+    await zkMultisigFactory
+      .connect(alice)
+      .createMultisig(initialParticipantsPerm, initialParticipantsRot, MIN_QUORUM, salt);
     // get deployed proxy
     const address = await zkMultisigFactory.computeZKMultisigAddress(alice.address, salt);
     // attach proxy address to zkMultisig
-    zkMultisig = zkMultisigImpl.attach(address) as ZKMultisig;
+    zkMultisig = zkMultisigImpl.attach(address) as ZKMultisigMock;
 
     // default proposal content
     proposalContent = {
@@ -107,283 +114,773 @@ describe("ZKMultisig", () => {
       data: "0x",
     };
 
-    // default zk params
-    zkParams = {
-      a: [randomNumber(), randomNumber()],
-      b: [
-        [randomNumber(), randomNumber()],
-        [randomNumber(), randomNumber()],
-      ],
-      c: [randomNumber(), randomNumber()],
-      inputs: [randomNumber(), randomNumber(), randomNumber()],
-    };
-
     await reverter.snapshot();
   });
 
   afterEach(reverter.revert);
 
-  describe("initial", async () => {
+  describe("initialize", () => {
     it("should have correct initial state", async () => {
-      expect(await zkMultisig.getParticipantsSMTRoot()).to.be.ok;
+      expect(await zkMultisig.getParticipantsCMTRoot()).to.be.ok;
 
-      expect(await zkMultisig.getParticipantsCount()).to.be.eq(initialParticipants.length);
-      expect(await zkMultisig.getParticipants()).to.be.deep.eq(initialParticipants);
+      expect(await zkMultisig.getParticipantsCount()).to.be.eq(initialParticipantsPerm.length);
 
-      expect((await zkMultisig.getParticipantsSMTProof(ethers.toBeHex(initialParticipants[0]))).existence).to.be.true;
-      expect((await zkMultisig.getParticipantsSMTProof(ethers.toBeHex(randomNumber()))).existence).to.be.false;
+      const expectedParticipants = [initialParticipantsPerm, initialParticipantsRot].map((keyArray) => {
+        return keyArray.map((pointStruct) => {
+          return [pointStruct.x, pointStruct.y];
+        });
+      });
+      expect(await zkMultisig.getParticipants()).to.be.deep.eq(expectedParticipants);
+
+      expect((await zkMultisig.getParticipantsCMTProof(encodePoint(initialParticipantsPerm[0]), proofSize)).existence)
+        .to.be.true;
+      expect((await zkMultisig.getParticipantsCMTProof(encodePoint(initialParticipantsRot[3], 2), proofSize)).existence)
+        .to.be.true;
+      expect((await zkMultisig.getParticipantsCMTProof(encodePoint({ x: 10n, y: 100n }), proofSize)).existence).to.be
+        .false;
 
       expect(await zkMultisig.getProposalsCount()).to.be.eq(0);
       expect(await zkMultisig.getProposalsIds(0, 10)).to.be.deep.eq([]);
 
       expect(await zkMultisig.getQuorumPercentage()).to.be.eq(MIN_QUORUM);
+
+      expect(await zkMultisig.getProposalsCount()).to.be.eq(0);
+      expect(await zkMultisig.getCurrentProposalId()).to.be.eq(0);
+
+      const [cumulativePermanentKey, cumulativeRotationKey] = getCumulativeKeys(
+        initialParticipantsPerm,
+        initialParticipantsRot,
+      );
+      expect(await zkMultisig.getCumulativePermanentKey()).to.be.deep.eq(cumulativePermanentKey);
+      expect(await zkMultisig.getCumulativeRotationKey()).to.be.deep.eq(cumulativeRotationKey);
+
+      expect(await zkMultisig.getCreationVerifier()).to.be.eq(await creationVerifier.getAddress());
+      expect(await zkMultisig.getVotingVerifier()).to.be.eq(await votingVerifier.getAddress());
     });
 
     it("should not allow to initialize twice", async () => {
       await expect(
-        zkMultisig.initialize(initialParticipants, MIN_QUORUM, positiveParticipantVerifier),
-      ).to.be.revertedWithCustomError({ interface: ZKMultisig__factory.createInterface() }, "InvalidInitialization");
+        zkMultisig.initialize(
+          initialParticipantsPerm,
+          initialParticipantsRot,
+          MIN_QUORUM,
+          creationVerifier,
+          votingVerifier,
+        ),
+      ).to.be.revertedWithCustomError(zkMultisig, "InvalidInitialization");
     });
 
     it("should not allow to call proposals functions directly", async () => {
-      await expect(zkMultisig.addParticipants(generateParticipants(3))).to.be.revertedWith(
-        "ZKMultisig: Not authorized call",
+      const [permanentKeys, rotationKeys] = generateParticipants(3);
+
+      await expect(zkMultisig.addParticipants(permanentKeys, rotationKeys)).to.be.revertedWithCustomError(
+        zkMultisig,
+        "NotAuthorizedCall",
       );
 
-      await expect(zkMultisig.removeParticipants(generateParticipants(3))).to.be.revertedWith(
-        "ZKMultisig: Not authorized call",
+      await expect(zkMultisig.removeParticipants(permanentKeys)).to.be.revertedWithCustomError(
+        zkMultisig,
+        "NotAuthorizedCall",
       );
 
-      await expect(zkMultisig.updateQuorumPercentage(MIN_QUORUM)).to.be.revertedWith("ZKMultisig: Not authorized call");
+      await expect(zkMultisig.updateQuorumPercentage(MIN_QUORUM)).to.be.revertedWithCustomError(
+        zkMultisig,
+        "NotAuthorizedCall",
+      );
 
-      await expect(zkMultisig.updateParticipantVerifier(ZERO_ADDR)).to.be.revertedWith(
-        "ZKMultisig: Not authorized call",
+      await expect(zkMultisig.updateCreationVerifier(ZERO_ADDR)).to.be.revertedWithCustomError(
+        zkMultisig,
+        "NotAuthorizedCall",
+      );
+
+      await expect(zkMultisig.updateVotingVerifier(ZERO_ADDR)).to.be.revertedWithCustomError(
+        zkMultisig,
+        "NotAuthorizedCall",
       );
     });
   });
 
-  describe("proposal flow", async () => {
-    const createProposal = async (data: BytesLike): Promise<{ proposalId: bigint; zkParams: ZKParams }> => {
-      proposalContent.data = data;
+  describe("addParticipants", () => {
+    it("should add participants correctly", async () => {
+      const initialCMTRoot = await zkMultisig.getParticipantsCMTRoot();
+
+      const newPermanentPoints = [
+        { x: 5, y: 6 },
+        { x: 12, y: 24 },
+      ];
+      const newRotationPoints = [
+        { x: 7, y: 8 },
+        { x: 13, y: 26 },
+      ];
+
+      const tx = await zkMultisig.addParticipantsExternal(newPermanentPoints, newRotationPoints);
+
+      await expect(tx).to.emit(zkMultisig, "ParticipantAdded").withArgs([5, 6], [7, 8]);
+      await expect(tx).to.emit(zkMultisig, "ParticipantAdded").withArgs([12, 24], [13, 26]);
+
+      expect(await zkMultisig.getParticipantsCount()).to.be.eq(7);
+      expect(await zkMultisig.getParticipantsCMTRoot()).not.to.be.eq(initialCMTRoot);
+
+      const participants = await zkMultisig.getParticipants();
+      expect(participants[0][5]).to.be.deep.eq([5, 6]);
+      expect(participants[1][5]).to.be.deep.eq([7, 8]);
+      expect(participants[0][6]).to.be.deep.eq([12, 24]);
+      expect(participants[1][6]).to.be.deep.eq([13, 26]);
+
+      const [cumulativePermanentKey, cumulativeRotationKey] = getCumulativeKeys(
+        [...initialParticipantsPerm, ...newPermanentPoints],
+        [...initialParticipantsRot, ...newRotationPoints],
+      );
+      expect(await zkMultisig.getCumulativePermanentKey()).to.be.deep.eq(cumulativePermanentKey);
+      expect(await zkMultisig.getCumulativeRotationKey()).to.be.deep.eq(cumulativeRotationKey);
+    });
+
+    it("should revert if msg.sender is not ZKMultisig", async () => {
+      await expect(zkMultisig.addParticipants([], [])).to.be.revertedWithCustomError(zkMultisig, "NotAuthorizedCall");
+    });
+
+    it("should revert if no participants are provided", async () => {
+      await expect(zkMultisig.addParticipantsExternal([], [])).to.be.revertedWithCustomError(
+        zkMultisig,
+        "NoParticipantsToProcess",
+      );
+    });
+
+    it("should revert if arrays with different length are provided", async () => {
+      await expect(
+        zkMultisig.addParticipantsExternal(
+          [
+            { x: 1, y: 1 },
+            { x: 2, y: 2 },
+          ],
+          [{ x: 3, y: 3 }],
+        ),
+      ).to.be.revertedWithCustomError(zkMultisig, "KeyLenMismatch");
+    });
+
+    it("should not add participant keys that are already added", async () => {
+      await zkMultisig.addParticipantsExternal(
+        [
+          { x: 1, y: 1 },
+          { x: 1, y: 1 },
+        ],
+        [
+          { x: 3, y: 3 },
+          { x: 2, y: 1 },
+        ],
+      );
+
+      expect(await zkMultisig.getParticipantsCount()).to.be.eq(6);
+    });
+  });
+
+  describe("removeParticipants", () => {
+    it("should remove participants correctly", async () => {
+      const initialCMTRoot = await zkMultisig.getParticipantsCMTRoot();
+
+      const tx = await zkMultisig.removeParticipantsExternal([initialParticipantsPerm[0], initialParticipantsPerm[2]]);
+
+      await expect(tx)
+        .to.emit(zkMultisig, "ParticipantRemoved")
+        .withArgs([initialParticipantsPerm[0].x, initialParticipantsPerm[0].y]);
+      await expect(tx)
+        .to.emit(zkMultisig, "ParticipantRemoved")
+        .withArgs([initialParticipantsPerm[2].x, initialParticipantsPerm[2].y]);
+
+      expect(await zkMultisig.getParticipantsCount()).to.be.eq(3);
+      expect(await zkMultisig.getParticipantsCMTRoot()).not.to.be.eq(initialCMTRoot);
+
+      const participants = await zkMultisig.getParticipants();
+      const initialParticipantsPermArr = pointsToArray(initialParticipantsPerm);
+
+      for (const [j, key] of initialParticipantsPermArr.entries()) {
+        const foundKey = participants[0].some((item) => item.every((v, i) => v === key[i]));
+
+        const shouldExist = ![0, 2].includes(j);
+        expect(foundKey).to.equal(shouldExist);
+      }
+
+      const [, cumulativeRotationKey] = getCumulativeKeys(initialParticipantsPerm, initialParticipantsRot);
+      const [cumulativePermanentKey] = getCumulativeKeys(
+        initialParticipantsPerm.filter((_, i) => ![0, 2].includes(i)),
+        initialParticipantsRot,
+      );
+      expect(await zkMultisig.getCumulativePermanentKey()).to.be.deep.eq(cumulativePermanentKey);
+      expect(await zkMultisig.getCumulativeRotationKey()).to.be.deep.eq(cumulativeRotationKey);
+    });
+
+    it("should revert if msg.sender is not ZKMultisig", async () => {
+      await expect(zkMultisig.removeParticipants([])).to.be.revertedWithCustomError(zkMultisig, "NotAuthorizedCall");
+    });
+
+    it("should revert if no participants are provided", async () => {
+      await expect(zkMultisig.removeParticipantsExternal([])).to.be.revertedWithCustomError(
+        zkMultisig,
+        "NoParticipantsToProcess",
+      );
+    });
+
+    it("should revert if removing all participants", async () => {
+      await expect(zkMultisig.removeParticipantsExternal(initialParticipantsPerm)).to.be.revertedWithCustomError(
+        zkMultisig,
+        "RemovingAllParticipants",
+      );
+    });
+
+    it("should not remove participant keys that don't exist", async () => {
+      const tx = await zkMultisig.removeParticipantsExternal([{ x: 1, y: 2 }]);
+
+      await expect(tx).not.to.emit(zkMultisig, "ParticipantRemoved");
+    });
+  });
+
+  describe("create", () => {
+    it("should create proposal correctly", async () => {
       const salt = randomNumber();
 
-      // blinder
-      zkParams.inputs[0] = randomNumber();
-      // challange
       const proposalId = await zkMultisig.computeProposalId(proposalContent, salt);
-      zkParams.inputs[1] = await zkMultisig.getProposalChallenge(proposalId);
-      // root
-      zkParams.inputs[2] = await zkMultisig.getParticipantsSMTRoot();
 
-      const tx = await zkMultisig.create(proposalContent, DAY_IN_SECONDS, salt, zkParams);
+      expect(await zkMultisig.getProposalStatus(proposalId)).to.be.eq(ProposalStatus.NONE);
 
-      expect(tx).to.emit(zkMultisigFactory, "ZKMultisigCreated").withArgs(proposalId, proposalContent);
+      const tx = await createProposal(zkMultisig, salt, proposalContent);
+
       expect(tx).to.emit(zkMultisig, "ProposalCreated").withArgs(proposalId, proposalContent);
-      expect(tx).to.emit(zkMultisig, "ProposalVoted").withArgs(proposalId, zkParams.inputs[0]);
 
+      expect((await zkMultisig.getParticipants())[1]).to.be.empty;
+      expect(await zkMultisig.getCumulativeRotationKey()).to.be.deep.eq([0, 1]);
+
+      expect(await zkMultisig.getCurrentProposalId()).to.be.eq(proposalId);
       expect(await zkMultisig.getProposalsCount()).to.be.eq(1);
-      expect(await zkMultisig.getProposalsIds(0, 10)).to.be.deep.eq([proposalId]);
-
-      expect(await zkMultisig.getProposalStatus(proposalId)).to.be.eq(BigInt(ProposalStatus.VOTING));
-
-      return { proposalId, zkParams };
-    };
-
-    const vote = async (proposalId: bigint, zkParams: ZKParams) => {
-      const tx = await zkMultisig.vote(proposalId, zkParams);
-
-      expect(tx).to.emit(zkMultisig, "ProposalVoted").withArgs(proposalId, zkParams.inputs[0]);
-      expect(await zkMultisig.isBlinderVoted(proposalId, zkParams.inputs[0])).to.be.true;
-      expect(await zkMultisig.getProposalStatus(proposalId)).to.be.oneOf([
-        BigInt(ProposalStatus.VOTING),
-        BigInt(ProposalStatus.ACCEPTED),
+      expect(await zkMultisig.getProposalsIds(0, 100)).to.be.deep.eq([proposalId]);
+      expect(await zkMultisig.getProposalStatus(proposalId)).to.be.eq(ProposalStatus.VOTING);
+      expect(await zkMultisig.getProposalInfo(proposalId)).to.be.deep.eq([
+        [proposalContent.target, proposalContent.value, proposalContent.data],
+        1,
+        0,
+        4,
       ]);
-    };
 
-    const execute = async (proposalId: bigint) => {
+      const challenge = await zkMultisig.getProposalChallenge(proposalId);
+      const h1 = poseidonHash(ethers.toBeHex(challenge, 32));
+      const h2 = poseidonHash(h1);
+
+      const [cumulativePermanentKey, cumulativeRotationKey] = getCumulativeKeys(
+        initialParticipantsPerm,
+        initialParticipantsRot,
+      );
+      const expectedEncryptionKey = addPoint(
+        mulPointEscalar(cumulativePermanentKey, BigInt(h1)),
+        mulPointEscalar(cumulativeRotationKey, BigInt(h2)),
+      );
+      expect(await zkMultisig.getEncryptionKey(proposalId)).to.be.deep.eq(expectedEncryptionKey);
+    });
+
+    it("should revert if the provided target is zero address", async () => {
+      const proposalContent = {
+        target: ethers.ZeroAddress,
+        value: 0,
+        data: "0x",
+      };
+
+      await expect(zkMultisig.create(proposalContent, randomNumber(), randomZKParams)).to.be.revertedWithCustomError(
+        zkMultisig,
+        "ZeroTarget",
+      );
+    });
+
+    it("should revert if proposal with the same proposal ID exists", async () => {
+      const salt = randomNumber();
+
+      const proposalId = await zkMultisig.computeProposalId(proposalContent, salt);
+
+      await createProposal(zkMultisig, salt, proposalContent);
+
+      await zkMultisig.deactivateProposal(proposalId);
+
+      await expect(zkMultisig.create(proposalContent, salt, randomZKParams))
+        .to.be.revertedWithCustomError(zkMultisig, "ProposalExists")
+        .withArgs(proposalId);
+    });
+
+    it("should revert if active proposal already exists", async () => {
+      const salt = randomNumber();
+
+      const proposalId = await zkMultisig.computeProposalId(proposalContent, salt);
+
+      await createProposal(zkMultisig, salt, proposalContent);
+
+      await expect(zkMultisig.create(proposalContent, salt, randomZKParams))
+        .to.be.revertedWithCustomError(zkMultisig, "ActiveProposal")
+        .withArgs(proposalId);
+    });
+
+    it("should revert if invalid zk params are provided", async () => {
+      const salt = randomNumber();
+
+      const proposalId = await zkMultisig.computeProposalId(proposalContent, salt);
+
+      const cmtProof1 = await zkMultisig.getParticipantsCMTProof(encodePoint(initialParticipantsPerm[1]), proofSize);
+      const cmtProof2 = await zkMultisig.getParticipantsCMTProof(encodePoint(initialParticipantsRot[1], 2), proofSize);
+
+      const circuit: ProposalCreation = await zkit.getCircuit("ProposalCreation");
+
+      const proof = await circuit.generateProof({
+        cmtRoot: BigInt(cmtProof2[0]),
+        proposalId: proposalId,
+        sk1: 3,
+        sk2: 4,
+        siblings: [cmtProof1[1].map((h) => BigInt(h)), cmtProof2[1].map((h) => BigInt(h))],
+        siblingsLength: [
+          numberToArray(BigInt(cmtProof1[2]), proofSize),
+          numberToArray(BigInt(cmtProof2[2]), proofSize),
+        ],
+        directionBits: [
+          parseNumberToBitsArray(BigInt(cmtProof1[3]), BigInt(cmtProof1[2]) / 2n, proofSize),
+          parseNumberToBitsArray(BigInt(cmtProof2[3]), BigInt(cmtProof2[2]) / 2n, proofSize),
+        ],
+        nonExistenceKey: [BigInt(cmtProof1[6]), BigInt(cmtProof2[6])],
+      });
+
+      const pi_b = proof.proof.pi_b;
+
+      const zkParams = {
+        a: [proof.proof.pi_a[0], proof.proof.pi_a[1]],
+        b: [
+          [pi_b[0][1], pi_b[0][0]],
+          [pi_b[1][1], pi_b[1][0]],
+        ],
+        c: [proof.proof.pi_c[0], proof.proof.pi_c[1]],
+      };
+
+      zkParams.b[0][0] = pi_b[0][0];
+      await expect(zkMultisig.create(proposalContent, salt, zkParams)).to.be.revertedWithCustomError(
+        zkMultisig,
+        "InvalidProof",
+      );
+    });
+  });
+
+  describe("vote", () => {
+    it("should vote on the proposal correctly", async () => {
+      const salt = randomNumber();
+
+      const proposalId = await zkMultisig.computeProposalId(proposalContent, salt);
+
+      await createProposal(zkMultisig, salt, proposalContent);
+
+      const initialCMTRoot = await zkMultisig.getParticipantsCMTRoot();
+
+      const cmtProof1: ProofStructOutput = await zkMultisig.getParticipantsCMTProof(
+        encodePoint(initialParticipantsPerm[4]),
+        proofSize,
+      );
+      const cmtProof2: ProofStructOutput = await zkMultisig.getParticipantsCMTProof(
+        encodePoint(initialParticipantsRot[4], 2),
+        proofSize,
+      );
+
+      // first vote
+      const keyNullifier1 = BigInt(poseidonHash(ethers.toBeHex(2n, 32)));
+      const blinder1 = getBlinder(1n, proposalId);
+
+      expect(await zkMultisig.isRotationKeyNullifierUsed(keyNullifier1)).to.be.false;
+
+      const v1 = await vote(zkMultisig, 1n, 2n, proposalId);
+
+      expect(v1.tx).to.emit(zkMultisig, "ProposalVoted").withArgs(proposalId, blinder1);
+
+      expect(await zkMultisig.isRotationKeyNullifierUsed(keyNullifier1)).to.be.true;
+      expect(await zkMultisig.getProposalInfo(proposalId)).to.be.deep.eq([
+        [proposalContent.target, proposalContent.value, proposalContent.data],
+        1,
+        1,
+        4,
+      ]);
+      expect(await zkMultisig.getProposalBlinders(proposalId)).to.be.deep.eq([blinder1]);
+      expect(await zkMultisig.getProposalDecryptionKey(proposalId)).to.be.eq(v1.decryptionKeyShare);
+      expect(await zkMultisig.getProposalAggregatedVotes(proposalId)).to.be.deep.eq(v1.vote);
+
+      let participants = await zkMultisig.getParticipants();
+      expect(await zkMultisig.getParticipantsCMTRoot()).not.to.be.eq(initialCMTRoot);
+      expect(await zkMultisig.getParticipantsCount()).to.be.eq(5);
+      expect(participants[0].length).to.be.eq(5);
+      expect(participants[1].length).to.be.eq(1);
+      expect(participants[1]).to.be.deep.eq([v1.newPk2]);
+
+      let [cumulativePermanentKey] = getCumulativeKeys(initialParticipantsPerm, initialParticipantsRot);
+      expect(await zkMultisig.getCumulativePermanentKey()).to.be.deep.eq(cumulativePermanentKey);
+      expect(await zkMultisig.getCumulativeRotationKey()).to.be.deep.eq(v1.newPk2);
+
+      // other votes
+      const v2 = await vote(zkMultisig, 5n, 6n, proposalId);
+      const v3 = await vote(zkMultisig, 9n, 10n, proposalId, false, initialCMTRoot, [cmtProof1, cmtProof2]);
+      const v4 = await vote(zkMultisig, 3n, 4n, proposalId);
+
+      const blinder2 = getBlinder(5n, proposalId);
+      const blinder3 = getBlinder(9n, proposalId);
+      const blinder4 = getBlinder(3n, proposalId);
+
+      const keyNullifier2 = BigInt(poseidonHash(ethers.toBeHex(6n, 32)));
+      const keyNullifier3 = BigInt(poseidonHash(ethers.toBeHex(10n, 32)));
+      const keyNullifier4 = BigInt(poseidonHash(ethers.toBeHex(4n, 32)));
+
+      expect(v2.tx).to.emit(zkMultisig, "ProposalVoted").withArgs(proposalId, blinder2);
+      expect(v3.tx).to.emit(zkMultisig, "ProposalVoted").withArgs(proposalId, blinder3);
+      expect(v4.tx).to.emit(zkMultisig, "ProposalVoted").withArgs(proposalId, blinder4);
+
+      expect(await zkMultisig.isRotationKeyNullifierUsed(keyNullifier2)).to.be.true;
+      expect(await zkMultisig.isRotationKeyNullifierUsed(keyNullifier3)).to.be.true;
+      expect(await zkMultisig.isRotationKeyNullifierUsed(keyNullifier4)).to.be.true;
+      expect(await zkMultisig.getProposalInfo(proposalId)).to.be.deep.eq([
+        [proposalContent.target, proposalContent.value, proposalContent.data],
+        1,
+        4,
+        4,
+      ]);
+      expect(await zkMultisig.getProposalBlinders(proposalId)).to.be.deep.eq([blinder1, blinder2, blinder3, blinder4]);
+      expect(await zkMultisig.getProposalDecryptionKey(proposalId)).to.be.eq(
+        aggregateDecryptionKeyShares([
+          v1.decryptionKeyShare,
+          v2.decryptionKeyShare,
+          v3.decryptionKeyShare,
+          v4.decryptionKeyShare,
+        ]),
+      );
+      expect(await zkMultisig.getProposalAggregatedVotes(proposalId)).to.be.deep.eq(
+        aggregateVotes([v1.vote, v2.vote, v3.vote, v4.vote]),
+      );
+
+      participants = await zkMultisig.getParticipants();
+      expect(await zkMultisig.getParticipantsCount()).to.be.eq(5);
+      expect(participants[0].length).to.be.eq(5);
+      expect(participants[1].length).to.be.eq(4);
+      expect(participants[1]).to.be.deep.eq([v1.newPk2, v2.newPk2, v3.newPk2, v4.newPk2]);
+
+      [cumulativePermanentKey] = getCumulativeKeys(initialParticipantsPerm, initialParticipantsRot);
+      expect(await zkMultisig.getCumulativePermanentKey()).to.be.deep.eq(cumulativePermanentKey);
+      expect(await zkMultisig.getCumulativeRotationKey()).to.be.deep.eq(
+        aggregatePoints([v1.newPk2, v2.newPk2, v3.newPk2, v4.newPk2]),
+      );
+    });
+
+    it("should revert if proposal is not in the voting status", async () => {
+      const invalidProposalId = randomNumber();
+
+      await expect(vote(zkMultisig, 1n, 2n, invalidProposalId))
+        .to.be.revertedWithCustomError(zkMultisig, "NotVoting")
+        .withArgs(invalidProposalId);
+    });
+
+    it("should revert if using already rotated pk2", async () => {
+      const salt = randomNumber();
+
+      const proposalId = await zkMultisig.computeProposalId(proposalContent, salt);
+
+      await createProposal(zkMultisig, salt, proposalContent);
+
+      await vote(zkMultisig, 3n, 4n, proposalId);
+
+      await expect(vote(zkMultisig, 3n, 4n, proposalId, false))
+        .to.be.revertedWithCustomError(zkMultisig, "UsedNullifier")
+        .withArgs(BigInt(poseidonHash(ethers.toBeHex(4n, 32))));
+    });
+
+    it("should revert if the same user tries to vote twice", async () => {
+      const salt = randomNumber();
+
+      const proposalId = await zkMultisig.computeProposalId(proposalContent, salt);
+
+      await createProposal(zkMultisig, salt, proposalContent);
+
+      await vote(zkMultisig, 3n, 4n, proposalId);
+
+      const blinder = getBlinder(3n, proposalId);
+
+      const encodedVote = ethers.AbiCoder.defaultAbiCoder().encode(
+        ["tuple(uint256,uint256)[2]"],
+        [
+          [
+            [10n, 20n],
+            [30n, 40n],
+          ],
+        ],
+      );
+
+      const voteParams = {
+        encryptedVote: encodedVote,
+        decryptionKeyShare: 100,
+        keyNullifier: 100,
+        blinder,
+        cmtRoot: await zkMultisig.getParticipantsCMTRoot(),
+        rotationKey: { x: 10, y: 20 },
+        proofData: randomZKParams,
+      };
+
+      await expect(zkMultisig.vote(proposalId, voteParams))
+        .to.be.revertedWithCustomError(zkMultisig, "UsedBlinder")
+        .withArgs(blinder);
+    });
+
+    it("should revert if invalid CMT root is provided", async () => {
+      const salt = randomNumber();
+
+      const proposalId = await zkMultisig.computeProposalId(proposalContent, salt);
+
+      await createProposal(zkMultisig, salt, proposalContent);
+
+      await vote(zkMultisig, 3n, 4n, proposalId);
+
+      const invalidRoot = ethers.toBeHex(randomNumber());
+
+      await expect(vote(zkMultisig, 5n, 6n, proposalId, false, invalidRoot))
+        .to.be.revertedWithCustomError(zkMultisig, "InvalidCMTRoot")
+        .withArgs(invalidRoot);
+    });
+
+    it("should revert if invalid zk params are provided", async () => {
+      const salt = randomNumber();
+
+      const proposalId = await zkMultisig.computeProposalId(proposalContent, salt);
+
+      await createProposal(zkMultisig, salt, proposalContent);
+
+      const encodedVote = ethers.AbiCoder.defaultAbiCoder().encode(
+        ["tuple(uint256,uint256)[2]"],
+        [
+          [
+            [1n, 2n],
+            [3n, 4n],
+          ],
+        ],
+      );
+
+      const voteParams = {
+        encryptedVote: encodedVote,
+        decryptionKeyShare: 100,
+        keyNullifier: 100,
+        blinder: 100,
+        cmtRoot: await zkMultisig.getParticipantsCMTRoot(),
+        rotationKey: { x: 10, y: 20 },
+        proofData: randomZKParams,
+      };
+
+      await expect(zkMultisig.vote(proposalId, voteParams)).to.be.revertedWithCustomError(zkMultisig, "InvalidProof");
+    });
+  });
+
+  describe("reveal", () => {
+    it("should reveal votes correctly", async () => {
+      let salt = randomNumber();
+
+      let proposalId = await zkMultisig.computeProposalId(proposalContent, salt);
+
+      await createProposal(zkMultisig, salt, proposalContent);
+
+      const v1 = await vote(zkMultisig, 5n, 6n, proposalId);
+      const v2 = await vote(zkMultisig, 1n, 2n, proposalId, false);
+      const v3 = await vote(zkMultisig, 3n, 4n, proposalId);
+      const v4 = await vote(zkMultisig, 9n, 10n, proposalId);
+      const v5 = await vote(zkMultisig, 7n, 8n, proposalId);
+
+      let tx = await zkMultisig.reveal(proposalId, 4);
+
+      await expect(tx).to.emit(zkMultisig, "ProposalRevealed").withArgs(proposalId, true);
+
+      expect(await zkMultisig.getProposalStatus(proposalId)).to.be.eq(ProposalStatus.ACCEPTED);
+
+      salt = randomNumber();
+
+      proposalId = await zkMultisig.computeProposalId(proposalContent, salt);
+
+      await createProposal(zkMultisig, salt, proposalContent);
+
+      await vote(zkMultisig, 5n, v1.newSk2, proposalId, false);
+      await vote(zkMultisig, 1n, v2.newSk2, proposalId, false);
+      await vote(zkMultisig, 3n, v3.newSk2, proposalId);
+      await vote(zkMultisig, 9n, v4.newSk2, proposalId, false);
+      await vote(zkMultisig, 7n, v5.newSk2, proposalId);
+
+      tx = await zkMultisig.reveal(proposalId, 2);
+
+      await expect(tx).to.emit(zkMultisig, "ProposalRevealed").withArgs(proposalId, false);
+
+      expect(await zkMultisig.getProposalStatus(proposalId)).to.be.eq(ProposalStatus.REJECTED);
+    });
+
+    it("should revert if the provided approvalVoteCount is incorrect or not everyone has voted", async () => {
+      let salt = randomNumber();
+
+      let proposalId = await zkMultisig.computeProposalId(proposalContent, salt);
+
+      await createProposal(zkMultisig, salt, proposalContent);
+
+      await vote(zkMultisig, 1n, 2n, proposalId, false);
+      await vote(zkMultisig, 3n, 4n, proposalId);
+      await vote(zkMultisig, 9n, 10n, proposalId);
+      await vote(zkMultisig, 7n, 8n, proposalId);
+
+      await expect(zkMultisig.reveal(proposalId, 3)).to.be.revertedWithCustomError(zkMultisig, "VoteCountMismatch");
+
+      await vote(zkMultisig, 5n, 6n, proposalId);
+
+      await expect(zkMultisig.reveal(proposalId, 3)).to.be.revertedWithCustomError(zkMultisig, "VoteCountMismatch");
+    });
+  });
+
+  describe("execute", () => {
+    it("should execute proposal correctly", async () => {
+      const newPermanentPoints = [
+        { x: 1, y: 11 },
+        { x: 3, y: 33 },
+      ];
+      const newRotationPoints = [
+        { x: 2, y: 22 },
+        { x: 4, y: 44 },
+      ];
+
+      const addParticipantsData = zkMultisig.interface.encodeFunctionData("addParticipants", [
+        newPermanentPoints,
+        newRotationPoints,
+      ]);
+
+      const proposalContent = {
+        target: await zkMultisig.getAddress(),
+        value: 0,
+        data: addParticipantsData,
+      };
+
+      const salt = randomNumber();
+
+      const proposalId = await zkMultisig.computeProposalId(proposalContent, salt);
+
+      await createProposal(zkMultisig, salt, proposalContent);
+
+      const v1 = await vote(zkMultisig, 5n, 6n, proposalId);
+      const v2 = await vote(zkMultisig, 1n, 2n, proposalId);
+      const v3 = await vote(zkMultisig, 3n, 4n, proposalId);
+      const v4 = await vote(zkMultisig, 9n, 10n, proposalId, false);
+      const v5 = await vote(zkMultisig, 7n, 8n, proposalId);
+
+      await zkMultisig.reveal(proposalId, 4);
+
       const tx = await zkMultisig.execute(proposalId);
 
-      expect(tx).to.emit(zkMultisig, "ProposalExecuted").withArgs(proposalId);
-      expect(await zkMultisig.getProposalStatus(proposalId)).to.be.eq(BigInt(ProposalStatus.EXECUTED));
-    };
+      await expect(tx).to.emit(zkMultisig, "ProposalExecuted").withArgs(proposalId);
+      await expect(tx).to.emit(zkMultisig, "ParticipantAdded").withArgs([1, 11], [2, 22]);
+      await expect(tx).to.emit(zkMultisig, "ParticipantAdded").withArgs([3, 33], [4, 44]);
 
-    describe("add particpants", async () => {
-      it("create", async () => {
-        const newParticipants = generateParticipants(2);
-        const data = ZKMultisig__factory.createInterface().encodeFunctionData("addParticipants(uint256[])", [
-          newParticipants,
-        ]);
+      expect(await zkMultisig.getProposalStatus(proposalId)).to.be.eq(ProposalStatus.EXECUTED);
+      expect(await zkMultisig.getParticipantsCount()).to.be.eq(7);
 
-        await createProposal(data);
-      });
+      const participants = await zkMultisig.getParticipants();
+      expect(participants[0][5]).to.be.deep.eq([1, 11]);
+      expect(participants[1][5]).to.be.deep.eq([2, 22]);
+      expect(participants[0][6]).to.be.deep.eq([3, 33]);
+      expect(participants[1][6]).to.be.deep.eq([4, 44]);
 
-      it("vote", async () => {
-        const newParticipants = generateParticipants(2);
-        const data = ZKMultisig__factory.createInterface().encodeFunctionData("addParticipants(uint256[])", [
-          newParticipants,
-        ]);
-
-        const { proposalId, zkParams } = await createProposal(data);
-
-        //update blinder as af
-        zkParams.inputs[0] = randomNumber();
-        await vote(proposalId, zkParams);
-      });
-
-      it("execute", async () => {
-        const newParticipants = generateParticipants(2);
-        const data = ZKMultisig__factory.createInterface().encodeFunctionData("addParticipants(uint256[])", [
-          newParticipants,
-        ]);
-
-        const { proposalId, zkParams } = await createProposal(data);
-
-        while ((await zkMultisig.getProposalStatus(proposalId)) != BigInt(ProposalStatus.ACCEPTED)) {
-          //update blinder as af
-          zkParams.inputs[0] = randomNumber();
-          await vote(proposalId, zkParams);
-        }
-
-        await execute(proposalId);
-
-        expect(await zkMultisig.getParticipantsCount()).to.be.eq(initialParticipants.length + newParticipants.length);
-        expect(await zkMultisig.getParticipants()).to.be.deep.eq([...initialParticipants, ...newParticipants]);
-
-        expect((await zkMultisig.getParticipantsSMTProof(ethers.toBeHex(newParticipants[0]))).existence).to.be.true;
-        expect((await zkMultisig.getParticipantsSMTProof(ethers.toBeHex(newParticipants[1]))).existence).to.be.true;
-      });
+      const [cumulativePermanentKey, cumulativeRotationKey] = getCumulativeKeys(
+        [...initialParticipantsPerm, ...newPermanentPoints],
+        [...arrayToPoints([v1.newPk2, v2.newPk2, v3.newPk2, v4.newPk2, v5.newPk2]), ...newRotationPoints],
+      );
+      expect(await zkMultisig.getCumulativePermanentKey()).to.be.deep.eq(cumulativePermanentKey);
+      expect(await zkMultisig.getCumulativeRotationKey()).to.be.deep.eq(cumulativeRotationKey);
     });
 
-    describe("remove particpants", async () => {
-      it("create", async () => {
-        const participantsToDelete = (await zkMultisig.getParticipants()).slice(0, 2);
-        const data = ZKMultisig__factory.createInterface().encodeFunctionData("removeParticipants(uint256[])", [
-          participantsToDelete,
-        ]);
-
-        await createProposal(data);
+    it("should execute proposal with value correctly", async () => {
+      await (
+        await ethers.getSigners()
+      )[0].sendTransaction({
+        to: await zkMultisig.getAddress(),
+        value: ethers.parseEther("1"),
       });
 
-      it("vote", async () => {
-        const participantsToDelete = (await zkMultisig.getParticipants()).slice(0, 2);
-        const data = ZKMultisig__factory.createInterface().encodeFunctionData("removeParticipants(uint256[])", [
-          participantsToDelete,
-        ]);
+      const ethReceiver = await ethers.deployContract("EthReceiverMock");
 
-        const { proposalId, zkParams } = await createProposal(data);
+      const proposalContent = {
+        target: await ethReceiver.getAddress(),
+        value: ethers.parseEther("1"),
+        data: "0x",
+      };
 
-        //update blinder as af
-        zkParams.inputs[0] = randomNumber();
-        await vote(proposalId, zkParams);
-      });
+      const salt = randomNumber();
 
-      it("execute", async () => {
-        const participantsToDelete = (await zkMultisig.getParticipants()).slice(0, 2);
-        const data = ZKMultisig__factory.createInterface().encodeFunctionData("removeParticipants(uint256[])", [
-          participantsToDelete,
-        ]);
+      const proposalId = await zkMultisig.computeProposalId(proposalContent, salt);
 
-        const { proposalId, zkParams } = await createProposal(data);
+      await createProposal(zkMultisig, salt, proposalContent);
 
-        while ((await zkMultisig.getProposalStatus(proposalId)) != BigInt(ProposalStatus.ACCEPTED)) {
-          //update blinder as af
-          zkParams.inputs[0] = randomNumber();
-          await vote(proposalId, zkParams);
-        }
+      await vote(zkMultisig, 1n, 2n, proposalId);
+      await vote(zkMultisig, 7n, 8n, proposalId);
+      await vote(zkMultisig, 5n, 6n, proposalId);
+      await vote(zkMultisig, 9n, 10n, proposalId);
+      await vote(zkMultisig, 3n, 4n, proposalId);
 
-        await execute(proposalId);
+      await zkMultisig.reveal(proposalId, 5);
 
-        expect(await zkMultisig.getParticipantsCount()).to.be.eq(
-          initialParticipants.length - participantsToDelete.length,
-        );
+      const tx = await zkMultisig.execute(proposalId, { value: ethers.parseEther("1") });
 
-        expect((await zkMultisig.getParticipantsSMTProof(ethers.toBeHex(initialParticipants[0]))).existence).to.be
-          .false;
-        expect((await zkMultisig.getParticipantsSMTProof(ethers.toBeHex(initialParticipants[4]))).existence).to.be.true;
-      });
+      await expect(tx).to.emit(zkMultisig, "ProposalExecuted").withArgs(proposalId);
+      await expect(tx)
+        .to.emit(ethReceiver, "ReceivedEth")
+        .withArgs(await zkMultisig.getAddress(), ethers.parseEther("1"));
     });
 
-    describe("update quorum percentage", async () => {
-      it("create", async () => {
-        const newQuorum = MIN_QUORUM + BigInt(10) * PRECISION;
-        const data = ZKMultisig__factory.createInterface().encodeFunctionData("updateQuorumPercentage(uint256)", [
-          newQuorum,
-        ]);
+    it("should revert if the proposal is not accepted", async () => {
+      const invalidProposalId = randomNumber();
 
-        await createProposal(data);
-      });
+      await expect(zkMultisig.execute(invalidProposalId))
+        .to.be.revertedWithCustomError(zkMultisig, "ProposalNotAccepted")
+        .withArgs(invalidProposalId);
 
-      it("vote", async () => {
-        const newQuorum = MIN_QUORUM + BigInt(10) * PRECISION;
-        const data = ZKMultisig__factory.createInterface().encodeFunctionData("updateQuorumPercentage(uint256)", [
-          newQuorum,
-        ]);
+      const salt = randomNumber();
 
-        const { proposalId, zkParams } = await createProposal(data);
+      const proposalId = await zkMultisig.computeProposalId(proposalContent, salt);
 
-        //update blinder as af
-        zkParams.inputs[0] = randomNumber();
-        await vote(proposalId, zkParams);
-      });
+      await createProposal(zkMultisig, salt, proposalContent);
 
-      it("execute", async () => {
-        const newQuorum = MIN_QUORUM + BigInt(10) * PRECISION;
-        const data = ZKMultisig__factory.createInterface().encodeFunctionData("updateQuorumPercentage(uint256)", [
-          newQuorum,
-        ]);
+      await vote(zkMultisig, 1n, 2n, proposalId);
+      await vote(zkMultisig, 7n, 8n, proposalId, false);
+      await vote(zkMultisig, 5n, 6n, proposalId, false);
+      await vote(zkMultisig, 9n, 10n, proposalId);
+      await vote(zkMultisig, 3n, 4n, proposalId);
 
-        const { proposalId, zkParams } = await createProposal(data);
+      await expect(zkMultisig.execute(proposalId))
+        .to.be.revertedWithCustomError(zkMultisig, "ProposalNotAccepted")
+        .withArgs(proposalId);
 
-        while ((await zkMultisig.getProposalStatus(proposalId)) != BigInt(ProposalStatus.ACCEPTED)) {
-          //update blinder as af
-          zkParams.inputs[0] = randomNumber();
-          await vote(proposalId, zkParams);
-        }
+      await zkMultisig.reveal(proposalId, 3);
 
-        await execute(proposalId);
-
-        expect(await zkMultisig.getQuorumPercentage()).to.be.eq(newQuorum);
-      });
+      await expect(zkMultisig.execute(proposalId))
+        .to.be.revertedWithCustomError(zkMultisig, "ProposalNotAccepted")
+        .withArgs(proposalId);
     });
 
-    describe("update participant verifier", async () => {
-      it("create", async () => {
-        const data = ZKMultisig__factory.createInterface().encodeFunctionData("updateParticipantVerifier(address)", [
-          await negativeParticipantVerifier.getAddress(),
-        ]);
+    it("should revert if invalid value is provided", async () => {
+      const proposalContent = {
+        target: await zkMultisigFactory.getAddress(),
+        value: ethers.parseEther("1"),
+        data: "0x",
+      };
 
-        await createProposal(data);
-      });
+      const salt = randomNumber();
 
-      it("vote", async () => {
-        const data = ZKMultisig__factory.createInterface().encodeFunctionData("updateParticipantVerifier(address)", [
-          await negativeParticipantVerifier.getAddress(),
-        ]);
+      const proposalId = await zkMultisig.computeProposalId(proposalContent, salt);
 
-        const { proposalId, zkParams } = await createProposal(data);
+      await createProposal(zkMultisig, salt, proposalContent);
 
-        //update blinder as af
-        zkParams.inputs[0] = randomNumber();
-        await vote(proposalId, zkParams);
-      });
+      await vote(zkMultisig, 1n, 2n, proposalId);
+      await vote(zkMultisig, 7n, 8n, proposalId);
+      await vote(zkMultisig, 5n, 6n, proposalId, false);
+      await vote(zkMultisig, 9n, 10n, proposalId);
+      await vote(zkMultisig, 3n, 4n, proposalId);
 
-      it("execute", async () => {
-        const data = ZKMultisig__factory.createInterface().encodeFunctionData("updateParticipantVerifier(address)", [
-          await negativeParticipantVerifier.getAddress(),
-        ]);
+      await zkMultisig.reveal(proposalId, 4);
 
-        const { proposalId, zkParams } = await createProposal(data);
-
-        while ((await zkMultisig.getProposalStatus(proposalId)) != BigInt(ProposalStatus.ACCEPTED)) {
-          //update blinder as af
-          zkParams.inputs[0] = randomNumber();
-          await vote(proposalId, zkParams);
-        }
-
-        await execute(proposalId);
-
-        expect(await zkMultisig.participantVerifier()).to.be.eq(await negativeParticipantVerifier.getAddress());
-      });
+      await expect(zkMultisig.execute(proposalId))
+        .to.be.revertedWithCustomError(zkMultisig, "InvalidValue")
+        .withArgs(0, ethers.parseEther("1"));
+      await expect(zkMultisig.execute(proposalId, { value: ethers.parseEther("0.5") }))
+        .to.be.revertedWithCustomError(zkMultisig, "InvalidValue")
+        .withArgs(ethers.parseEther("0.5"), ethers.parseEther("1"));
     });
   });
 });

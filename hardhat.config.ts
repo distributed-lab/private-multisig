@@ -3,6 +3,7 @@ import "@nomicfoundation/hardhat-chai-matchers";
 import "@solarity/hardhat-migrate";
 import "@solarity/hardhat-gobind";
 import "@solarity/hardhat-markup";
+import "@solarity/hardhat-zkit";
 import "@typechain/hardhat";
 import "hardhat-contract-sizer";
 import "hardhat-gas-reporter";
@@ -22,6 +23,7 @@ const config: HardhatUserConfig = {
   networks: {
     hardhat: {
       initialDate: "1970-01-01T00:00:00Z",
+      allowUnlimitedContractSize: true,
     },
     localhost: {
       url: "http://127.0.0.1:8545",
@@ -71,7 +73,7 @@ const config: HardhatUserConfig = {
     },
   },
   solidity: {
-    version: "0.8.20",
+    version: "0.8.22",
     settings: {
       optimizer: {
         enabled: true,
