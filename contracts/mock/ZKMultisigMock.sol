@@ -25,6 +25,18 @@ contract ZKMultisigMock is ZKMultisig {
         _removeParticipants(permanentKeys_);
     }
 
+    function updateQuorumPercentageExternal(uint256 newQuorumPercentage_) external {
+        _updateQuorumPercentage(newQuorumPercentage_);
+    }
+
+    function updateVerifierExternal(address verifier_, bool creation_) external {
+        if (creation_) {
+            _updateCreationVerifier(verifier_);
+        } else {
+            _updateVotingVerifier(verifier_);
+        }
+    }
+
     function deactivateProposal(uint256 proposalId_) external {
         _getZKMultisigMockStorage().proposals[proposalId_].status = ProposalStatus.EXECUTED;
     }

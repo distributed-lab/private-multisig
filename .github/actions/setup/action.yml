@@ -13,3 +13,6 @@ runs:
     - name: Install packages
       run: npm install
       shell: bash
+    - name: Generate verifiers
+      run: npx hardhat zkit verifiers
+      shell: bash

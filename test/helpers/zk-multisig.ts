@@ -2,11 +2,12 @@ import { ethers, zkit } from "hardhat";
 import { addPoint, Base8, mulPointEscalar, Point } from "@zk-kit/baby-jubjub";
 import { poseidonHash } from "@/test/helpers/poseidon-hash";
 import { ProposalCreation, Voting } from "@/generated-types/zkit";
-import { ZKMultisigMock } from "@ethers-v6";
+import { IZKMultisig, ZKMultisigMock } from "@ethers-v6";
 import { CartesianMerkleTree, ED256 } from "@/generated-types/ethers/contracts/ZKMultisig";
 import ProofStructOutput = CartesianMerkleTree.ProofStructOutput;
 import { randomBytes } from "crypto";
 import APointStruct = ED256.APointStruct;
+import ProposalContent = IZKMultisig.ProposalContentStruct;
 
 const proofSize = 20;
 const inf: Point<bigint> = [0n, 1n];
@@ -19,25 +20,18 @@ export function randomNumber() {
 export async function createProposal(zkMultisig: ZKMultisigMock, salt: bigint, content: ProposalContent) {
   const proposalId = await zkMultisig.computeProposalId(content, salt);
 
-  const pk2 = await mulPointEscalar(Base8, 2n);
-
-  const cmtProof1 = await zkMultisig.getParticipantsCMTProof(encodePoint({ x: Base8[0], y: Base8[1] }), proofSize);
-  const cmtProof2 = await zkMultisig.getParticipantsCMTProof(encodePoint({ x: pk2[0], y: pk2[1] }, 2), proofSize);
+  const cmtProof = await zkMultisig.getParticipantsCMTProof(encodePoint({ x: Base8[0], y: Base8[1] }), proofSize);
 
   const circuit: ProposalCreation = await zkit.getCircuit("ProposalCreation");
 
   const proof = await circuit.generateProof({
-    cmtRoot: BigInt(cmtProof1[0]),
+    cmtRoot: BigInt(cmtProof[0]),
     proposalId: proposalId,
-    sk1: 1,
-    sk2: 2,
-    siblings: [cmtProof1[1].map((h) => BigInt(h)), cmtProof2[1].map((h) => BigInt(h))],
-    siblingsLength: [numberToArray(BigInt(cmtProof1[2]), proofSize), numberToArray(BigInt(cmtProof2[2]), proofSize)],
-    directionBits: [
-      parseNumberToBitsArray(BigInt(cmtProof1[3]), BigInt(cmtProof1[2]) / 2n, proofSize),
-      parseNumberToBitsArray(BigInt(cmtProof2[3]), BigInt(cmtProof2[2]) / 2n, proofSize),
-    ],
-    nonExistenceKey: [BigInt(cmtProof1[6]), BigInt(cmtProof2[6])],
+    sk: 1,
+    siblings: cmtProof[1].map((h) => BigInt(h)),
+    siblingsLength: numberToArray(BigInt(cmtProof[2]), proofSize),
+    directionBits: parseNumberToBitsArray(BigInt(cmtProof[3]), BigInt(cmtProof[2]) / 2n, proofSize),
+    nonExistenceKey: BigInt(cmtProof[6]),
   });
 
   const pi_b = proof.proof.pi_b;
@@ -263,7 +257,7 @@ export function generateParticipants(length: number) {
 }
 
 export function getCumulativeKeys(permanentPoints: APointStruct[], rotationPoints: APointStruct[]) {
-  const sumPoints = (points: APointStruct[], initial: Point<bigint> = [0n, 0n]): Point<bigint> => {
+  const sumPoints = (points: APointStruct[]): Point<bigint> => {
     return points.reduce<Point<bigint>>(
       (acc, p) => {
         const point: Point<bigint> = [BigInt(p.x), BigInt(p.y)];

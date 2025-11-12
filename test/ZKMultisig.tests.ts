@@ -14,9 +14,8 @@ import { getPoseidon, poseidonHash } from "./helpers";
 import { addPoint, mulPointEscalar } from "@zk-kit/baby-jubjub";
 import { zkit } from "hardhat";
 import { ProposalCreation } from "@zkit";
-import { ED256 } from "@/generated-types/ethers/contracts/libs/BabyJubJub";
+import { CartesianMerkleTree, ED256 } from "@/generated-types/ethers/contracts/ZKMultisig";
 import APointStruct = ED256.APointStruct;
-import { CartesianMerkleTree } from "@/generated-types/ethers/contracts/ZKMultisig";
 import ProofStructOutput = CartesianMerkleTree.ProofStructOutput;
 import {
   aggregateDecryptionKeyShares,
@@ -34,6 +33,7 @@ import {
   randomNumber,
   vote,
 } from "@/test/helpers/zk-multisig";
+import { ZeroAddress } from "ethers";
 type ProposalContent = IZKMultisig.ProposalContentStruct;
 
 enum ProposalStatus {
@@ -328,9 +328,169 @@ describe("ZKMultisig", () => {
     });
 
     it("should not remove participant keys that don't exist", async () => {
-      const tx = await zkMultisig.removeParticipantsExternal([{ x: 1, y: 2 }]);
+      const keysToRemove = [{ x: 1, y: 2 }];
+
+      const removeParticipantsData = zkMultisig.interface.encodeFunctionData("removeParticipants", [keysToRemove]);
+
+      const proposalContent = {
+        target: await zkMultisig.getAddress(),
+        value: 0,
+        data: removeParticipantsData,
+      };
+
+      const salt = randomNumber();
+
+      const proposalId = await zkMultisig.computeProposalId(proposalContent, salt);
+
+      await createProposal(zkMultisig, salt, proposalContent);
+
+      await vote(zkMultisig, 5n, 6n, proposalId);
+      await vote(zkMultisig, 1n, 2n, proposalId);
+      await vote(zkMultisig, 3n, 4n, proposalId);
+      await vote(zkMultisig, 9n, 10n, proposalId, false);
+      await vote(zkMultisig, 7n, 8n, proposalId);
+
+      const tx = await zkMultisig.revealAndExecute(proposalId, 4);
 
       await expect(tx).not.to.emit(zkMultisig, "ParticipantRemoved");
+    });
+  });
+
+  describe("updateQuorumPercentage", () => {
+    it("should update quorum percentage correctly", async () => {
+      const newQuorum = BigInt(50) * PRECISION;
+
+      const updateQuorumPercentageData = zkMultisig.interface.encodeFunctionData("updateQuorumPercentage", [newQuorum]);
+
+      const proposalContent = {
+        target: await zkMultisig.getAddress(),
+        value: 0,
+        data: updateQuorumPercentageData,
+      };
+
+      const salt = randomNumber();
+
+      const proposalId = await zkMultisig.computeProposalId(proposalContent, salt);
+
+      await createProposal(zkMultisig, salt, proposalContent);
+
+      await vote(zkMultisig, 5n, 6n, proposalId, false);
+      await vote(zkMultisig, 1n, 2n, proposalId);
+      await vote(zkMultisig, 3n, 4n, proposalId);
+      await vote(zkMultisig, 9n, 10n, proposalId);
+      await vote(zkMultisig, 7n, 8n, proposalId);
+
+      await zkMultisig.revealAndExecute(proposalId, 4);
+
+      expect(await zkMultisig.getQuorumPercentage()).to.be.eq(newQuorum);
+      expect(await zkMultisig.getRequiredQuorum()).to.be.eq(2);
+    });
+
+    it("should revert if quorum percentage value is invalid", async () => {
+      await expect(zkMultisig.updateQuorumPercentageExternal(0))
+        .to.be.revertedWithCustomError(zkMultisig, "InvalidQuorum")
+        .withArgs(0);
+      await expect(zkMultisig.updateQuorumPercentageExternal(110n * PRECISION))
+        .to.be.revertedWithCustomError(zkMultisig, "InvalidQuorum")
+        .withArgs(110n * PRECISION);
+      await expect(zkMultisig.updateQuorumPercentageExternal(MIN_QUORUM))
+        .to.be.revertedWithCustomError(zkMultisig, "InvalidQuorum")
+        .withArgs(MIN_QUORUM);
+    });
+
+    it("should revert if msg.sender is not ZKMultisig", async () => {
+      await expect(zkMultisig.updateQuorumPercentage(60n * PRECISION)).to.be.revertedWithCustomError(
+        zkMultisig,
+        "NotAuthorizedCall",
+      );
+    });
+  });
+
+  describe("updateVerifier", () => {
+    it("should update verifiers correctly", async () => {
+      const updateCreationVerifierData = zkMultisig.interface.encodeFunctionData("updateCreationVerifier", [
+        await zkMultisigFactory.getAddress(),
+      ]);
+      const updateVotingVerifierData = zkMultisig.interface.encodeFunctionData("updateVotingVerifier", [
+        await zkMultisigFactory.getAddress(),
+      ]);
+
+      const proposalContentCreation = {
+        target: await zkMultisig.getAddress(),
+        value: 0,
+        data: updateCreationVerifierData,
+      };
+      const proposalContentVoting = {
+        target: await zkMultisig.getAddress(),
+        value: 0,
+        data: updateVotingVerifierData,
+      };
+
+      let salt = randomNumber();
+
+      let proposalId = await zkMultisig.computeProposalId(proposalContentCreation, salt);
+
+      await createProposal(zkMultisig, salt, proposalContentCreation);
+
+      const v1 = await vote(zkMultisig, 1n, 2n, proposalId);
+      const v2 = await vote(zkMultisig, 7n, 8n, proposalId);
+      const v3 = await vote(zkMultisig, 3n, 4n, proposalId);
+      const v4 = await vote(zkMultisig, 9n, 10n, proposalId);
+      const v5 = await vote(zkMultisig, 5n, 6n, proposalId);
+
+      await zkMultisig.revealAndExecute(proposalId, 5);
+
+      expect(await zkMultisig.getCreationVerifier()).to.be.eq(await zkMultisigFactory.getAddress());
+
+      await zkMultisig.updateVerifierExternal(creationVerifier, true);
+
+      salt = randomNumber();
+
+      proposalId = await zkMultisig.computeProposalId(proposalContentVoting, salt);
+
+      await createProposal(zkMultisig, salt, proposalContentVoting);
+
+      await vote(zkMultisig, 1n, v1.newSk2, proposalId, false);
+      await vote(zkMultisig, 7n, v2.newSk2, proposalId);
+      await vote(zkMultisig, 3n, v3.newSk2, proposalId);
+      await vote(zkMultisig, 9n, v4.newSk2, proposalId);
+      await vote(zkMultisig, 5n, v5.newSk2, proposalId);
+
+      await zkMultisig.reveal(proposalId, 4);
+      await zkMultisig.execute(proposalId);
+
+      expect(await zkMultisig.getVotingVerifier()).to.be.eq(await zkMultisigFactory.getAddress());
+    });
+
+    it("should revert if invalid verifier address is provided", async () => {
+      const [signer] = await ethers.getSigners();
+
+      await expect(zkMultisig.updateVerifierExternal(ZeroAddress, true)).to.be.revertedWithCustomError(
+        zkMultisig,
+        "ZeroVerifier",
+      );
+      await expect(zkMultisig.updateVerifierExternal(creationVerifier, true)).to.be.revertedWithCustomError(
+        zkMultisig,
+        "DuplicateVerifier",
+      );
+      await expect(zkMultisig.updateVerifierExternal(votingVerifier, false)).to.be.revertedWithCustomError(
+        zkMultisig,
+        "DuplicateVerifier",
+      );
+      await expect(zkMultisig.updateVerifierExternal(signer, false))
+        .to.be.revertedWithCustomError(zkMultisig, "NotAContract")
+        .withArgs(signer.address);
+    });
+
+    it("should revert if msg.sender is not ZKMultisig", async () => {
+      await expect(zkMultisig.updateCreationVerifier(zkMultisigFactory)).to.be.revertedWithCustomError(
+        zkMultisig,
+        "NotAuthorizedCall",
+      );
+      await expect(zkMultisig.updateVotingVerifier(zkMultisigFactory)).to.be.revertedWithCustomError(
+        zkMultisig,
+        "NotAuthorizedCall",
+      );
     });
   });
 
@@ -419,26 +579,18 @@ describe("ZKMultisig", () => {
 
       const proposalId = await zkMultisig.computeProposalId(proposalContent, salt);
 
-      const cmtProof1 = await zkMultisig.getParticipantsCMTProof(encodePoint(initialParticipantsPerm[1]), proofSize);
-      const cmtProof2 = await zkMultisig.getParticipantsCMTProof(encodePoint(initialParticipantsRot[1], 2), proofSize);
+      const cmtProof = await zkMultisig.getParticipantsCMTProof(encodePoint(initialParticipantsPerm[1]), proofSize);
 
       const circuit: ProposalCreation = await zkit.getCircuit("ProposalCreation");
 
       const proof = await circuit.generateProof({
-        cmtRoot: BigInt(cmtProof2[0]),
+        cmtRoot: BigInt(cmtProof[0]),
         proposalId: proposalId,
-        sk1: 3,
-        sk2: 4,
-        siblings: [cmtProof1[1].map((h) => BigInt(h)), cmtProof2[1].map((h) => BigInt(h))],
-        siblingsLength: [
-          numberToArray(BigInt(cmtProof1[2]), proofSize),
-          numberToArray(BigInt(cmtProof2[2]), proofSize),
-        ],
-        directionBits: [
-          parseNumberToBitsArray(BigInt(cmtProof1[3]), BigInt(cmtProof1[2]) / 2n, proofSize),
-          parseNumberToBitsArray(BigInt(cmtProof2[3]), BigInt(cmtProof2[2]) / 2n, proofSize),
-        ],
-        nonExistenceKey: [BigInt(cmtProof1[6]), BigInt(cmtProof2[6])],
+        sk: 3,
+        siblings: cmtProof[1].map((h) => BigInt(h)),
+        siblingsLength: numberToArray(BigInt(cmtProof[2]), proofSize),
+        directionBits: parseNumberToBitsArray(BigInt(cmtProof[3]), BigInt(cmtProof[2]) / 2n, proofSize),
+        nonExistenceKey: BigInt(cmtProof[6]),
       });
 
       const pi_b = proof.proof.pi_b;
