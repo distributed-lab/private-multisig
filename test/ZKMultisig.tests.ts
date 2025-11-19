@@ -49,7 +49,7 @@ describe("ZKMultisig", () => {
 
   const MIN_QUORUM = BigInt(80) * PRECISION;
 
-  const proofSize = 20;
+  const proofSize = 40;
 
   const randomZKParams = {
     a: [randomNumber(), randomNumber()],
@@ -350,7 +350,7 @@ describe("ZKMultisig", () => {
       await vote(zkMultisig, 9n, 10n, proposalId, false);
       await vote(zkMultisig, 7n, 8n, proposalId);
 
-      const tx = await zkMultisig.revealAndExecute(proposalId, 4);
+      const tx = await zkMultisig.revealAndExecute(4);
 
       await expect(tx).not.to.emit(zkMultisig, "ParticipantRemoved");
     });
@@ -380,7 +380,7 @@ describe("ZKMultisig", () => {
       await vote(zkMultisig, 9n, 10n, proposalId);
       await vote(zkMultisig, 7n, 8n, proposalId);
 
-      await zkMultisig.revealAndExecute(proposalId, 4);
+      await zkMultisig.revealAndExecute(4);
 
       expect(await zkMultisig.getQuorumPercentage()).to.be.eq(newQuorum);
       expect(await zkMultisig.getRequiredQuorum()).to.be.eq(2);
@@ -438,7 +438,7 @@ describe("ZKMultisig", () => {
       const v4 = await vote(zkMultisig, 9n, 10n, proposalId);
       const v5 = await vote(zkMultisig, 5n, 6n, proposalId);
 
-      await zkMultisig.revealAndExecute(proposalId, 5);
+      await zkMultisig.revealAndExecute(5);
 
       expect(await zkMultisig.getCreationVerifier()).to.be.eq(await zkMultisigFactory.getAddress());
 
@@ -456,7 +456,7 @@ describe("ZKMultisig", () => {
       await vote(zkMultisig, 9n, v4.newSk2, proposalId);
       await vote(zkMultisig, 5n, v5.newSk2, proposalId);
 
-      await zkMultisig.reveal(proposalId, 4);
+      await zkMultisig.reveal(4);
       await zkMultisig.execute(proposalId);
 
       expect(await zkMultisig.getVotingVerifier()).to.be.eq(await zkMultisigFactory.getAddress());
@@ -590,7 +590,6 @@ describe("ZKMultisig", () => {
         siblings: cmtProof[1].map((h) => BigInt(h)),
         siblingsLength: numberToArray(BigInt(cmtProof[2]), proofSize),
         directionBits: parseNumberToBitsArray(BigInt(cmtProof[3]), BigInt(cmtProof[2]) / 2n, proofSize),
-        nonExistenceKey: BigInt(cmtProof[6]),
       });
 
       const pi_b = proof.proof.pi_b;
@@ -720,7 +719,7 @@ describe("ZKMultisig", () => {
 
       await expect(vote(zkMultisig, 1n, 2n, invalidProposalId))
         .to.be.revertedWithCustomError(zkMultisig, "NotVoting")
-        .withArgs(invalidProposalId);
+        .withArgs(0);
     });
 
     it("should revert if using already rotated pk2", async () => {
@@ -768,7 +767,7 @@ describe("ZKMultisig", () => {
         proofData: randomZKParams,
       };
 
-      await expect(zkMultisig.vote(proposalId, voteParams))
+      await expect(zkMultisig.vote(voteParams))
         .to.be.revertedWithCustomError(zkMultisig, "UsedBlinder")
         .withArgs(blinder);
     });
@@ -782,7 +781,7 @@ describe("ZKMultisig", () => {
 
       await vote(zkMultisig, 3n, 4n, proposalId);
 
-      const invalidRoot = ethers.toBeHex(randomNumber());
+      const invalidRoot = ethers.toBeHex(randomNumber(), 32);
 
       await expect(vote(zkMultisig, 5n, 6n, proposalId, false, invalidRoot))
         .to.be.revertedWithCustomError(zkMultisig, "InvalidCMTRoot")
@@ -791,8 +790,6 @@ describe("ZKMultisig", () => {
 
     it("should revert if invalid zk params are provided", async () => {
       const salt = randomNumber();
-
-      const proposalId = await zkMultisig.computeProposalId(proposalContent, salt);
 
       await createProposal(zkMultisig, salt, proposalContent);
 
@@ -816,7 +813,7 @@ describe("ZKMultisig", () => {
         proofData: randomZKParams,
       };
 
-      await expect(zkMultisig.vote(proposalId, voteParams)).to.be.revertedWithCustomError(zkMultisig, "InvalidProof");
+      await expect(zkMultisig.vote(voteParams)).to.be.revertedWithCustomError(zkMultisig, "InvalidProof");
     });
   });
 
@@ -834,7 +831,7 @@ describe("ZKMultisig", () => {
       const v4 = await vote(zkMultisig, 9n, 10n, proposalId);
       const v5 = await vote(zkMultisig, 7n, 8n, proposalId);
 
-      let tx = await zkMultisig.reveal(proposalId, 4);
+      let tx = await zkMultisig.reveal(4);
 
       await expect(tx).to.emit(zkMultisig, "ProposalRevealed").withArgs(proposalId, true);
 
@@ -852,7 +849,7 @@ describe("ZKMultisig", () => {
       await vote(zkMultisig, 9n, v4.newSk2, proposalId, false);
       await vote(zkMultisig, 7n, v5.newSk2, proposalId);
 
-      tx = await zkMultisig.reveal(proposalId, 2);
+      tx = await zkMultisig.reveal(2);
 
       await expect(tx).to.emit(zkMultisig, "ProposalRevealed").withArgs(proposalId, false);
 
@@ -871,11 +868,11 @@ describe("ZKMultisig", () => {
       await vote(zkMultisig, 9n, 10n, proposalId);
       await vote(zkMultisig, 7n, 8n, proposalId);
 
-      await expect(zkMultisig.reveal(proposalId, 3)).to.be.revertedWithCustomError(zkMultisig, "VoteCountMismatch");
+      await expect(zkMultisig.reveal(3)).to.be.revertedWithCustomError(zkMultisig, "VoteCountMismatch");
 
       await vote(zkMultisig, 5n, 6n, proposalId);
 
-      await expect(zkMultisig.reveal(proposalId, 3)).to.be.revertedWithCustomError(zkMultisig, "VoteCountMismatch");
+      await expect(zkMultisig.reveal(3)).to.be.revertedWithCustomError(zkMultisig, "VoteCountMismatch");
     });
   });
 
@@ -913,7 +910,7 @@ describe("ZKMultisig", () => {
       const v4 = await vote(zkMultisig, 9n, 10n, proposalId, false);
       const v5 = await vote(zkMultisig, 7n, 8n, proposalId);
 
-      await zkMultisig.reveal(proposalId, 4);
+      await zkMultisig.reveal(4);
 
       const tx = await zkMultisig.execute(proposalId);
 
@@ -966,7 +963,7 @@ describe("ZKMultisig", () => {
       await vote(zkMultisig, 9n, 10n, proposalId);
       await vote(zkMultisig, 3n, 4n, proposalId);
 
-      await zkMultisig.reveal(proposalId, 5);
+      await zkMultisig.reveal(5);
 
       const tx = await zkMultisig.execute(proposalId, { value: ethers.parseEther("1") });
 
@@ -999,7 +996,7 @@ describe("ZKMultisig", () => {
         .to.be.revertedWithCustomError(zkMultisig, "ProposalNotAccepted")
         .withArgs(proposalId);
 
-      await zkMultisig.reveal(proposalId, 3);
+      await zkMultisig.reveal(3);
 
       await expect(zkMultisig.execute(proposalId))
         .to.be.revertedWithCustomError(zkMultisig, "ProposalNotAccepted")
@@ -1025,7 +1022,7 @@ describe("ZKMultisig", () => {
       await vote(zkMultisig, 9n, 10n, proposalId);
       await vote(zkMultisig, 3n, 4n, proposalId);
 
-      await zkMultisig.reveal(proposalId, 4);
+      await zkMultisig.reveal(4);
 
       await expect(zkMultisig.execute(proposalId))
         .to.be.revertedWithCustomError(zkMultisig, "InvalidValue")

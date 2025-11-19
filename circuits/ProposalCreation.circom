@@ -1,8 +1,8 @@
 pragma circom 2.1.6;
 
 include "./babyjubjub/babyjub.circom";
-include "../node_modules/@solarity/circom-lib/data-structures/CartesianMerkleTree.circom";
-include "../node_modules/@solarity/circom-lib/hasher/poseidon/poseidon.circom";
+include "@solarity/circom-lib/hasher/poseidon/poseidon.circom";
+include "@solarity/circom-lib/data-structures/CartesianMerkleTree.circom";
 
 template ProposalCreation(proofSize) {
     signal input cmtRoot;
@@ -13,7 +13,6 @@ template ProposalCreation(proofSize) {
     signal input siblings[proofSize];
     signal input siblingsLength[proofSize/2];
     signal input directionBits[proofSize/2];
-    signal input nonExistenceKey;
 
     component pbk = BabyPbk();
     pbk.in <== sk;
@@ -37,7 +36,7 @@ template ProposalCreation(proofSize) {
     cmt.siblingsLength <== siblingsLength;
     cmt.directionBits <== directionBits;
     cmt.key <== key;
-    cmt.nonExistenceKey <== nonExistenceKey;
+    cmt.nonExistenceKey <== 0;
     cmt.isExclusion <== 0;
     cmt.dummy <== 0;
 
@@ -45,4 +44,4 @@ template ProposalCreation(proofSize) {
     proposalConstraint <== proposalId * key;
 }
 
-component main {public [cmtRoot, proposalId]} = ProposalCreation(20);
+component main {public [cmtRoot, proposalId]} = ProposalCreation(40);

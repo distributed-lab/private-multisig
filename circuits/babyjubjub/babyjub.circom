@@ -19,7 +19,7 @@
 pragma circom 2.1.6;
 
 include "./escalarmulfix.circom";
-include "../../node_modules/@solarity/circom-lib/bitify/bitify.circom";
+include "@solarity/circom-lib/bitify/bitify.circom";
 
 template BabyAdd() {
     signal input x1;

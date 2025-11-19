@@ -20,7 +20,7 @@ pragma circom 2.1.6;
 
 include "./montgomery.circom";
 include "./babyjub.circom";
-include "../../node_modules/@solarity/circom-lib/bitify/comparators.circom";
+include "@solarity/circom-lib/bitify/comparators.circom";
 
 template Multiplexor2() {
     signal input sel;

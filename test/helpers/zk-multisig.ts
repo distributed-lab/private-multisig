@@ -9,7 +9,7 @@ import { randomBytes } from "crypto";
 import APointStruct = ED256.APointStruct;
 import ProposalContent = IZKMultisig.ProposalContentStruct;
 
-const proofSize = 20;
+const proofSize = 40;
 const inf: Point<bigint> = [0n, 1n];
 const babyJubJubN = 2736030358979909402780800718157159386076813972158567259200215660948447373041n;
 
@@ -31,7 +31,6 @@ export async function createProposal(zkMultisig: ZKMultisigMock, salt: bigint, c
     siblings: cmtProof[1].map((h) => BigInt(h)),
     siblingsLength: numberToArray(BigInt(cmtProof[2]), proofSize),
     directionBits: parseNumberToBitsArray(BigInt(cmtProof[3]), BigInt(cmtProof[2]) / 2n, proofSize),
-    nonExistenceKey: BigInt(cmtProof[6]),
   });
 
   const pi_b = proof.proof.pi_b;
@@ -86,6 +85,12 @@ export async function vote(
 
   const cmtRoot = cmtProofRoot ?? cmtProof1[0];
 
+  const rotationMsg = await zkMultisig.getRotationKDFMSGToSign(proposalId);
+
+  // mock signature
+  const newSk2 = (BigInt(rotationMsg) + sk2) % babyJubJubN;
+  const newPk2 = mulPointEscalar(Base8, newSk2);
+
   const circuit: Voting = await zkit.getCircuit("Voting");
 
   const proof = await circuit.generateProof({
@@ -95,6 +100,7 @@ export async function vote(
     cmtRoot: BigInt(cmtProof1[0]),
     sk1,
     sk2,
+    newSk2,
     vote: M,
     k,
     decryptionKeyShare,
@@ -104,7 +110,6 @@ export async function vote(
       parseNumberToBitsArray(BigInt(cmtProof1[3]), BigInt(cmtProof1[2]) / 2n, proofSize),
       parseNumberToBitsArray(BigInt(cmtProof2[3]), BigInt(cmtProof2[2]) / 2n, proofSize),
     ],
-    nonExistenceKey: [BigInt(cmtProof1[6]), BigInt(cmtProof2[6])],
   });
 
   const pi_b = proof.proof.pi_b;
@@ -121,12 +126,6 @@ export async function vote(
 
   const encodedVote = ethers.AbiCoder.defaultAbiCoder().encode(["tuple(uint256,uint256)[2]"], [[C1, C2]]);
 
-  const rotationMsg = await zkMultisig.getRotationKDFMSGToSign(proposalId);
-
-  // mock signature
-  const newSk2 = (BigInt(rotationMsg) + sk2) % babyJubJubN;
-  const newPk2 = mulPointEscalar(Base8, newSk2);
-
   const rotationKey = {
     x: newPk2[0],
     y: newPk2[1],
@@ -142,7 +141,7 @@ export async function vote(
     proofData: zkParams,
   };
 
-  const tx = await zkMultisig.vote(proposalId, voteParams);
+  const tx = await zkMultisig.vote(voteParams);
 
   return {
     tx,

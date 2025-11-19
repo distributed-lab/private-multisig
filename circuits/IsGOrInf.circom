@@ -1,6 +1,6 @@
 pragma circom 2.1.6;
 
-include "../node_modules/@solarity/circom-lib/bitify/comparators.circom";
+include "@solarity/circom-lib/bitify/comparators.circom";
 
 template IsGOrInf() {
     var Gx = 5299619240641551281634865583518297030282874472190772894086521144482721001553;

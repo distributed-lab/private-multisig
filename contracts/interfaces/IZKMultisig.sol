@@ -106,9 +106,11 @@ interface IZKMultisig {
         ZKParams calldata proofData_
     ) external returns (uint256);
 
-    function vote(uint256 proposalId_, VoteParams calldata params_) external;
+    function vote(VoteParams calldata params_) external;
 
-    function reveal(uint256 proposalId_, uint256 approvalVoteCount_) external;
+    function reveal(uint256 approvalVoteCount_) external;
+
+    function revealAndExecute(uint256 approvalVoteCount_) external payable;
 
     function execute(uint256 proposalId_) external payable;
 

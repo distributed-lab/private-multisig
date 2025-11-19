@@ -159,18 +159,20 @@ contract ZKMultisig is UUPSUpgradeable, EIP712Upgradeable, IZKMultisig {
         return proposalId_;
     }
 
-    function vote(uint256 proposalId_, VoteParams calldata params_) external {
-        _vote(proposalId_, params_);
+    function vote(VoteParams calldata params_) external {
+        _vote(_getZKMultisigStorage().currentProposalId, params_);
     }
 
-    function revealAndExecute(uint256 proposalId_, uint256 approvalVoteCount_) external payable {
+    function revealAndExecute(uint256 approvalVoteCount_) external payable {
+        uint256 proposalId_ = _getZKMultisigStorage().currentProposalId;
+
         _reveal(proposalId_, approvalVoteCount_);
 
         _execute(proposalId_);
     }
 
-    function reveal(uint256 proposalId_, uint256 approvalVoteCount_) external {
-        _reveal(proposalId_, approvalVoteCount_);
+    function reveal(uint256 approvalVoteCount_) external {
+        _reveal(_getZKMultisigStorage().currentProposalId, approvalVoteCount_);
     }
 
     function execute(uint256 proposalId_) external payable {
@@ -532,19 +534,21 @@ contract ZKMultisig is UUPSUpgradeable, EIP712Upgradeable, IZKMultisig {
 
         ProposalData storage proposal = $.proposals[proposalId_];
 
-        uint256[] memory inputs_ = new uint256[](12);
+        uint256[] memory inputs_ = new uint256[](14);
         inputs_[0] = params_.blinder;
         inputs_[1] = params_.keyNullifier;
         inputs_[2] = vote_[0].x;
         inputs_[3] = vote_[0].y;
         inputs_[4] = vote_[1].x;
         inputs_[5] = vote_[1].y;
-        inputs_[6] = params_.decryptionKeyShare;
-        inputs_[7] = proposal.encryptionKey.x;
-        inputs_[8] = proposal.encryptionKey.y;
-        inputs_[9] = proposal.challenge;
-        inputs_[10] = proposalId_;
-        inputs_[11] = uint256(params_.cmtRoot);
+        inputs_[6] = params_.rotationKey.x;
+        inputs_[7] = params_.rotationKey.y;
+        inputs_[8] = params_.decryptionKeyShare;
+        inputs_[9] = proposal.encryptionKey.x;
+        inputs_[10] = proposal.encryptionKey.y;
+        inputs_[11] = proposal.challenge;
+        inputs_[12] = proposalId_;
+        inputs_[13] = uint256(params_.cmtRoot);
 
         if (
             !$.votingVerifier.verifyProof(

@@ -4,8 +4,8 @@ include "./IsGOrInf.circom";
 include "./ElGamal.circom";
 include "./babyjubjub/babyjub.circom";
 include "./babyjubjub/escalarmulany.circom";
-include "../node_modules/@solarity/circom-lib/data-structures/CartesianMerkleTree.circom";
-include "../node_modules/@solarity/circom-lib/hasher/poseidon/poseidon.circom";
+include "@solarity/circom-lib/hasher/poseidon/poseidon.circom";
+include "@solarity/circom-lib/data-structures/CartesianMerkleTree.circom";
 
 template Voting(proofSize) {
     signal input decryptionKeyShare;
@@ -16,6 +16,7 @@ template Voting(proofSize) {
 
     signal input sk1;
     signal input sk2;
+    signal input newSk2;
 
     signal input vote[2];
     signal input k;
@@ -24,12 +25,13 @@ template Voting(proofSize) {
     signal input siblings[2][proofSize];
     signal input siblingsLength[2][proofSize/2];
     signal input directionBits[2][proofSize/2];
-    signal input nonExistenceKey[2];
 
     signal output blinder;
     signal output nullifier;
     signal output C1[2];
     signal output C2[2];
+
+    signal output rotationKey[2];
 
     // pk = skG
     component pbk1 = BabyPbk();
@@ -46,6 +48,12 @@ template Voting(proofSize) {
     publicKey2[0] <== pbk2.Ax;
     publicKey2[1] <== pbk2.Ay;
 
+    component rotationPbk = BabyPbk();
+    rotationPbk.in <== newSk2;
+
+    rotationKey[0] <== rotationPbk.Ax;
+    rotationKey[1] <== rotationPbk.Ay;
+
     component keyHash1 = Poseidon(3);
     keyHash1.in[0] <== publicKey1[0];
     keyHash1.in[1] <== publicKey1[1];
@@ -61,7 +69,7 @@ template Voting(proofSize) {
     cmt1.siblingsLength <== siblingsLength[0];
     cmt1.directionBits <== directionBits[0];
     cmt1.key <== key1;
-    cmt1.nonExistenceKey <== nonExistenceKey[0];
+    cmt1.nonExistenceKey <== 0;
     cmt1.isExclusion <== 0;
     cmt1.dummy <== 0;
 
@@ -80,7 +88,7 @@ template Voting(proofSize) {
     cmt2.siblingsLength <== siblingsLength[1];
     cmt2.directionBits <== directionBits[1];
     cmt2.key <== key2;
-    cmt2.nonExistenceKey <== nonExistenceKey[1];
+    cmt2.nonExistenceKey <== 0;
     cmt2.isExclusion <== 0;
     cmt2.dummy <== 0;
 
@@ -177,4 +185,4 @@ template Voting(proofSize) {
     C2 <== elgamal.D;
 }
 
-component main {public [decryptionKeyShare, encryptionKey, challenge, proposalId, cmtRoot, decryptionKeyShare]} = Voting(20);
+component main {public [decryptionKeyShare, encryptionKey, challenge, proposalId, cmtRoot, decryptionKeyShare]} = Voting(40);
