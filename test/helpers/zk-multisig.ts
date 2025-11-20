@@ -20,13 +20,20 @@ export function randomNumber() {
 export async function createProposal(zkMultisig: ZKMultisigMock, salt: bigint, content: ProposalContent) {
   const proposalId = await zkMultisig.computeProposalId(content, salt);
 
+  const challengeEncoded = ethers.AbiCoder.defaultAbiCoder().encode(
+    ["uint256", "address", "uint256"],
+    [(await ethers.provider.getNetwork()).chainId, await zkMultisig.getAddress(), proposalId],
+  );
+
+  const challenge = BigInt(ethers.keccak256(challengeEncoded));
+
   const cmtProof = await zkMultisig.getParticipantsCMTProof(encodePoint({ x: Base8[0], y: Base8[1] }), proofSize);
 
   const circuit: ProposalCreation = await zkit.getCircuit("ProposalCreation");
 
   const proof = await circuit.generateProof({
     cmtRoot: BigInt(cmtProof[0]),
-    proposalId: proposalId,
+    challenge,
     sk: 1,
     siblings: cmtProof[1].map((h) => BigInt(h)),
     siblingsLength: numberToArray(BigInt(cmtProof[2]), proofSize),

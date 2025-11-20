@@ -6,7 +6,7 @@ include "@solarity/circom-lib/data-structures/CartesianMerkleTree.circom";
 
 template ProposalCreation(proofSize) {
     signal input cmtRoot;
-    signal input proposalId;
+    signal input challenge;
 
     signal input sk;
 
@@ -40,8 +40,8 @@ template ProposalCreation(proofSize) {
     cmt.isExclusion <== 0;
     cmt.dummy <== 0;
 
-    signal proposalConstraint;
-    proposalConstraint <== proposalId * key;
+    signal challengeConstraint;
+    challengeConstraint <== challenge * key;
 }
 
-component main {public [cmtRoot, proposalId]} = ProposalCreation(40);
+component main {public [cmtRoot, challenge]} = ProposalCreation(40);

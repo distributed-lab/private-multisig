@@ -132,7 +132,11 @@ contract ZKMultisig is UUPSUpgradeable, EIP712Upgradeable, IZKMultisig {
             revert ProposalExists(proposalId_);
         }
 
-        _validateCreationZKParams(proposalId_, proofData_);
+        uint256 challenge_ = uint256(
+            keccak256(abi.encode(block.chainid, address(this), proposalId_))
+        ) % BabyJubJub.curve().p;
+
+        _validateCreationZKParams(challenge_, proofData_);
 
         $.currentProposalId = proposalId_;
 
@@ -141,10 +145,6 @@ contract ZKMultisig is UUPSUpgradeable, EIP712Upgradeable, IZKMultisig {
 
         proposal.content = content_;
         proposal.roots.add($.participantsCMT.getRoot());
-
-        uint256 challenge_ = uint256(
-            keccak256(abi.encode(block.chainid, address(this), proposalId_))
-        ) % BabyJubJub.curve().p;
 
         proposal.challenge = challenge_;
         proposal.encryptionKey = _computeEncryptionKey(challenge_);
@@ -500,14 +500,14 @@ contract ZKMultisig is UUPSUpgradeable, EIP712Upgradeable, IZKMultisig {
     }
 
     function _validateCreationZKParams(
-        uint256 proposalId_,
+        uint256 challenge_,
         ZKParams calldata proofData_
     ) internal view {
         ZKMultisigStorage storage $ = _getZKMultisigStorage();
 
         uint256[] memory inputs_ = new uint256[](2);
         inputs_[0] = uint256($.participantsCMT.getRoot());
-        inputs_[1] = proposalId_;
+        inputs_[1] = challenge_;
 
         if (
             !$.creationVerifier.verifyProof(

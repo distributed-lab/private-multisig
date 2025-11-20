@@ -585,7 +585,7 @@ describe("ZKMultisig", () => {
 
       const proof = await circuit.generateProof({
         cmtRoot: BigInt(cmtProof[0]),
-        proposalId: proposalId,
+        challenge: proposalId,
         sk: 3,
         siblings: cmtProof[1].map((h) => BigInt(h)),
         siblingsLength: numberToArray(BigInt(cmtProof[2]), proofSize),
