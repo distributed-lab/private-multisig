@@ -2,25 +2,27 @@ import { PRECISION, ZERO_ADDR } from "@/scripts/utils/constants";
 import { Reverter } from "@/test/helpers/reverter";
 import {
   ERC1967Proxy__factory,
-  NegativeVerifierMock,
-  PositiveVerifierMock,
-  ZKMultisig,
+  ProposalCreationGroth16Verifier,
+  VotingGroth16Verifier,
+  ZKMultisigMock,
   ZKMultisigFactory,
 } from "@ethers-v6";
 import { SignerWithAddress } from "@nomicfoundation/hardhat-ethers/signers";
 import { expect } from "chai";
 import { randomBytes } from "crypto";
-import { AbiCoder, solidityPacked as encodePacked, keccak256, TypedDataDomain } from "ethers";
+import { AbiCoder, solidityPacked as encodePacked, keccak256, TypedDataDomain, ZeroAddress } from "ethers";
 import { ethers } from "hardhat";
 import { getPoseidon } from "./helpers";
+import { generateParticipants, pointsToArray } from "@/test/helpers/zk-multisig";
 
-describe("ZKMultisig Factory", () => {
+describe("ZKMultisigFactory", () => {
   const reverter = new Reverter();
 
   let alice: SignerWithAddress;
 
-  let participantVerifier: PositiveVerifierMock | NegativeVerifierMock;
-  let zkMultisig: ZKMultisig;
+  let creationVerifier: ProposalCreationGroth16Verifier;
+  let votingVerifier: VotingGroth16Verifier;
+  let zkMultisig: ZKMultisigMock;
   let zkMultisigFactory: ZKMultisigFactory;
 
   const encode = (types: ReadonlyArray<string>, values: ReadonlyArray<any>): string => {
@@ -32,37 +34,30 @@ describe("ZKMultisig Factory", () => {
   before(async () => {
     [alice] = await ethers.getSigners();
 
-    const verifier__factory = await ethers.getContractFactory("PositiveVerifierMock");
-    participantVerifier = await verifier__factory.deploy();
+    creationVerifier = await ethers.deployContract("ProposalCreationGroth16Verifier");
+    votingVerifier = await ethers.deployContract("VotingGroth16Verifier");
 
-    await participantVerifier.waitForDeployment();
-
-    const zkMultisig__factory = await ethers.getContractFactory("ZKMultisig", {
+    zkMultisig = await ethers.deployContract("ZKMultisigMock", {
       libraries: {
         PoseidonUnit1L: await (await getPoseidon(1)).getAddress(),
+        PoseidonUnit3L: await (await getPoseidon(3)).getAddress(),
       },
     });
-    zkMultisig = await zkMultisig__factory.deploy();
 
-    await zkMultisig.waitForDeployment();
+    zkMultisigFactory = await ethers.deployContract("ZKMultisigFactory");
 
-    const zkMultisigFactory__factory = await ethers.getContractFactory("ZKMultisigFactory");
-    zkMultisigFactory = await zkMultisigFactory__factory.deploy(
-      await zkMultisig.getAddress(),
-      await participantVerifier.getAddress(),
-    );
-
-    await zkMultisigFactory.waitForDeployment();
+    await zkMultisigFactory.initialize(zkMultisig, creationVerifier, votingVerifier);
 
     await reverter.snapshot();
   });
 
   afterEach(reverter.revert);
 
-  describe("initial", () => {
+  describe("initialize", () => {
     it("should set parameters correctly", async () => {
-      expect(await zkMultisigFactory.ZK_MULTISIG_IMPL()).to.eq(await zkMultisig.getAddress());
-      expect(await zkMultisigFactory.PARTICIPANT_VERIFIER()).to.eq(await participantVerifier.getAddress());
+      expect(await zkMultisigFactory.getZKMultisigImplementation()).to.eq(await zkMultisig.getAddress());
+      expect(await zkMultisigFactory.getCreationVerifier()).to.eq(await creationVerifier.getAddress());
+      expect(await zkMultisigFactory.getVotingVerifier()).to.eq(await votingVerifier.getAddress());
     });
 
     it("should have correct initial state", async () => {
@@ -70,13 +65,27 @@ describe("ZKMultisig Factory", () => {
       expect(await zkMultisigFactory.getZKMultisigs(0, 1)).to.be.deep.eq([]);
     });
 
-    it("should revert if contructor parameters are incorrect", async () => {
-      const factory = await ethers.getContractFactory("ZKMultisigFactory");
-      const err = "ZKMultisigFactory: Invalid implementation or verifier address";
+    it("should revert if initialize parameters are incorrect", async () => {
+      const factory = await ethers.deployContract("ZKMultisigFactory");
 
-      // deploy multisig factory with zero address
-      await expect(factory.deploy(ZERO_ADDR, await participantVerifier.getAddress())).to.be.revertedWith(err);
-      await expect(factory.deploy(await zkMultisig.getAddress(), ZERO_ADDR)).to.be.revertedWith(err);
+      await expect(factory.initialize(ZeroAddress, creationVerifier, votingVerifier)).to.be.revertedWithCustomError(
+        zkMultisigFactory,
+        "InvalidImplementationOrVerifier",
+      );
+      await expect(factory.initialize(zkMultisig, ZeroAddress, votingVerifier)).to.be.revertedWithCustomError(
+        zkMultisigFactory,
+        "InvalidImplementationOrVerifier",
+      );
+      await expect(factory.initialize(zkMultisig, creationVerifier, ZeroAddress)).to.be.revertedWithCustomError(
+        zkMultisigFactory,
+        "InvalidImplementationOrVerifier",
+      );
+    });
+
+    it("should revert if ctrying to initialize twice", async () => {
+      await expect(
+        zkMultisigFactory.initialize(zkMultisig, creationVerifier, creationVerifier),
+      ).to.be.revertedWithCustomError(zkMultisigFactory, "InvalidInitialization");
     });
   });
 
@@ -131,16 +140,15 @@ describe("ZKMultisig Factory", () => {
       expect(await zkMultisigFactory.getZKMultisigs(0, 1)).to.be.deep.eq([]);
 
       // add participants
-      let participants: bigint[] = [];
-      for (let i = 0; i < 5; i++) {
-        participants.push(randomNumber());
-      }
+      const [participantsPerm, participantsRot] = generateParticipants(10);
 
       const quorum = BigInt(80) * PRECISION;
 
-      const tx = zkMultisigFactory.connect(alice).createMultisig(participants, quorum, salt);
+      const tx = zkMultisigFactory.connect(alice).createMultisig(participantsPerm, participantsRot, quorum, salt);
 
-      await expect(tx).to.emit(zkMultisigFactory, "ZKMultisigCreated").withArgs(multisigAddress, participants, quorum);
+      await expect(tx)
+        .to.emit(zkMultisigFactory, "ZKMultisigCreated")
+        .withArgs(multisigAddress, pointsToArray(participantsPerm), pointsToArray(participantsRot), quorum);
 
       expect(await zkMultisigFactory.isZKMultisig(multisigAddress)).to.be.eq(true);
       expect(await zkMultisigFactory.getZKMultisigsCount()).to.be.eq(1);

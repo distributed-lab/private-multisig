@@ -30,14 +30,16 @@
     "lint-sol-fix": "prettier --write \"contracts/**/*.sol\""
   },
   "dependencies": {
-    "@openzeppelin/contracts": "5.0.2",
-    "@openzeppelin/contracts-upgradeable": "5.0.2",
-    "@solarity/solidity-lib": "2.7.11",
+    "@openzeppelin/contracts": "5.4.0",
+    "@openzeppelin/contracts-upgradeable": "5.4.0",
+    "@solarity/circom-lib": "0.2.2",
+    "@solarity/solidity-lib": "3.2.8",
     "dotenv": "16.4.5",
     "hardhat": "2.20.1",
     "typechain": "8.3.2"
   },
   "devDependencies": {
+    "@iden3/js-crypto": "^1.1.0",
     "@metamask/eth-sig-util": "^7.0.1",
     "@nomicfoundation/hardhat-chai-matchers": "^2.0.6",
     "@nomicfoundation/hardhat-ethers": "^3.0.5",
@@ -45,13 +47,16 @@
     "@solarity/hardhat-gobind": "^1.2.2",
     "@solarity/hardhat-markup": "^1.0.7",
     "@solarity/hardhat-migrate": "^2.1.7",
+    "@solarity/hardhat-zkit": "^0.5.17",
     "@typechain/ethers-v6": "^0.5.1",
     "@typechain/hardhat": "^9.1.0",
     "@types/chai": "^4.3.14",
     "@types/mocha": "^10.0.6",
     "@types/node": "^18.16.0",
+    "@zk-kit/baby-jubjub": "^1.0.3",
     "bignumber.js": "^9.1.2",
     "chai": "^4.4.1",
+    "circomlibjs": "^0.1.7",
     "ethers": "^6.11.1",
     "hardhat-contract-sizer": "^2.10.0",
     "hardhat-gas-reporter": "^2.0.2",
@@ -64,8 +69,6 @@
     "solidity-coverage": "^0.8.11",
     "ts-node": "^10.9.2",
     "tsconfig-paths": "^4.2.0",
-    "typescript": "^5.4.3",
-    "circomlibjs": "^0.1.7",
-    "@iden3/js-crypto": "^1.1.0"
+    "typescript": "^5.4.3"
   }
 }

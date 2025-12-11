@@ -1,41 +1,57 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.4;
+pragma solidity ^0.8.21;
 
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {EIP712Upgradeable} from "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
 import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 
-import {SparseMerkleTree} from "@solarity/solidity-lib/libs/data-structures/SparseMerkleTree.sol";
+import {CartesianMerkleTree} from "@solarity/solidity-lib/libs/data-structures/CartesianMerkleTree.sol";
 import {PRECISION, PERCENTAGE_100} from "@solarity/solidity-lib/utils/Globals.sol";
 import {Paginator} from "@solarity/solidity-lib/libs/arrays/Paginator.sol";
-import {VerifierHelper} from "@solarity/solidity-lib/libs/zkp/snarkjs/VerifierHelper.sol";
+import {Groth16VerifierHelper} from "@solarity/solidity-lib/libs/zkp/Groth16VerifierHelper.sol";
+import {ED256} from "@solarity/solidity-lib/libs/crypto/ED256.sol";
 
 import {IZKMultisig} from "./interfaces/IZKMultisig.sol";
-import {PoseidonUnit1L} from "./libs/Poseidon.sol";
+import {PoseidonUnit1L, PoseidonUnit3L} from "./libs/Poseidon.sol";
+import {BabyJubJub} from "./libs/BabyJubJub.sol";
 
-contract ZKMultisig is UUPSUpgradeable, IZKMultisig {
+contract ZKMultisig is UUPSUpgradeable, EIP712Upgradeable, IZKMultisig {
+    using BabyJubJub for *;
     using EnumerableSet for *;
     using Paginator for EnumerableSet.UintSet;
-    using SparseMerkleTree for SparseMerkleTree.UintSMT;
-    using VerifierHelper for address;
+    using CartesianMerkleTree for CartesianMerkleTree.UintCMT;
+    using Groth16VerifierHelper for address;
     using Address for address;
     using Math for uint256;
+
+    // bytes32(uint256(keccak256("private.multisig.contract.ZKMultisig")) - 1)
+    bytes32 private constant ZK_MULTISIG_STORAGE =
+        0x498bc96b7d273653a6dbed08a392bbda0eadd6b7201a83a295108683ba304490;
+
+    bytes32 public constant KDF_ROTATION_MSG_TYPEHASH =
+        keccak256("KDF(address zkMultisigAddr,uint256 proposalId)");
 
     uint256 public constant PARTICIPANTS_TREE_DEPTH = 20;
     uint256 public constant MIN_QUORUM_SIZE = 1;
 
-    address public participantVerifier;
-
-    SparseMerkleTree.UintSMT internal _participantsSMT;
-    EnumerableSet.UintSet internal _participants;
-    EnumerableSet.UintSet internal _proposalIds;
-
-    uint256 private _quorumPercentage;
-
-    mapping(uint256 => ProposalData) private _proposals;
+    struct ZKMultisigStorage {
+        address creationVerifier;
+        address votingVerifier;
+        uint256 quorumPercentage;
+        uint256 currentProposalId;
+        CartesianMerkleTree.UintCMT participantsCMT;
+        EnumerableSet.UintSet proposalIds;
+        EnumerableSet.UintSet participantsPermanent;
+        EnumerableSet.UintSet participantsRotation;
+        ED256.PPoint cumulativePermanentKey;
+        ED256.PPoint cumulativeRotationKey;
+        mapping(uint256 => ED256.APoint) participantPermanentKeys;
+        mapping(uint256 => ED256.APoint) participantRotationKeys;
+        mapping(uint256 => bool) rotationKeyNullifiers;
+        mapping(uint256 => ProposalData) proposals;
+    }
 
     modifier onlyThis() {
         _validateMsgSender();
@@ -47,133 +63,189 @@ contract ZKMultisig is UUPSUpgradeable, IZKMultisig {
     }
 
     function initialize(
-        uint256[] memory participants_,
+        ED256.APoint[] calldata permanentKeys_,
+        ED256.APoint[] calldata rotationKeys_,
         uint256 quorumPercentage_,
-        address participantVerifier_
+        address creationVerifier_,
+        address votingVerifier_
     ) external initializer {
-        _participantsSMT.initialize(uint32(PARTICIPANTS_TREE_DEPTH));
+        __EIP712_init("ZKMultisig", "1");
 
-        _updateParticipantVerifier(participantVerifier_);
+        ZKMultisigStorage storage $ = _getZKMultisigStorage();
+
+        $.participantsCMT.initialize(uint32(PARTICIPANTS_TREE_DEPTH));
+        $.participantsCMT.setHasher(poseidon3);
+
+        _updateCreationVerifier(creationVerifier_);
+        _updateVotingVerifier(votingVerifier_);
         _updateQuorumPercentage(quorumPercentage_);
-        _addParticipants(participants_);
+
+        $.cumulativePermanentKey = ED256.pInfinity();
+        $.cumulativeRotationKey = ED256.pInfinity();
+
+        _addParticipants(permanentKeys_, rotationKeys_);
     }
 
-    function addParticipants(uint256[] calldata participantsToAdd_) external onlyThis {
-        _addParticipants(participantsToAdd_);
+    function addParticipants(
+        ED256.APoint[] calldata permanentKeys_,
+        ED256.APoint[] calldata rotationKeys_
+    ) external onlyThis {
+        _addParticipants(permanentKeys_, rotationKeys_);
     }
 
-    function removeParticipants(uint256[] calldata participantsToRemove_) external onlyThis {
-        _removeParticipants(participantsToRemove_);
+    function removeParticipants(ED256.APoint[] calldata permanentKeys_) external onlyThis {
+        _removeParticipants(permanentKeys_);
     }
 
     function updateQuorumPercentage(uint256 newQuorumPercentage_) external onlyThis {
         _updateQuorumPercentage(newQuorumPercentage_);
     }
 
-    function updateParticipantVerifier(address participantVerifier_) external onlyThis {
-        _updateParticipantVerifier(participantVerifier_);
+    function updateCreationVerifier(address creationVerifier_) external onlyThis {
+        _updateCreationVerifier(creationVerifier_);
+    }
+
+    function updateVotingVerifier(address votingVerifier_) external onlyThis {
+        _updateVotingVerifier(votingVerifier_);
     }
 
     function create(
         ProposalContent calldata content_,
-        uint256 duration_,
         uint256 salt_,
         ZKParams calldata proofData_
     ) external returns (uint256) {
         // validate inputs
-        require(duration_ > 0, "ZKMultisig: Invalid duration");
-        require(content_.target != address(0), "ZKMultisig: Invalid target");
+        if (content_.target == address(0)) revert ZeroTarget();
+
+        ZKMultisigStorage storage $ = _getZKMultisigStorage();
+
+        if ($.proposals[$.currentProposalId].status == ProposalStatus.VOTING) {
+            revert ActiveProposal($.currentProposalId);
+        }
 
         uint256 proposalId_ = computeProposalId(content_, salt_);
 
+        ProposalData storage proposal = $.proposals[proposalId_];
+
         // validate proposal state
-        require(
-            getProposalStatus(proposalId_) == ProposalStatus.NONE,
-            "ZKMultisig: Proposal already exists"
-        );
+        if (proposal.status != ProposalStatus.NONE) {
+            revert ProposalExists(proposalId_);
+        }
+
+        uint256 challenge_ = uint256(
+            keccak256(abi.encode(block.chainid, address(this), proposalId_))
+        ) % BabyJubJub.curve().p;
+
+        _validateCreationZKParams(challenge_, proofData_);
+
+        $.currentProposalId = proposalId_;
 
         // create proposal
-        ProposalData storage _proposal = _proposals[proposalId_];
-        _proposalIds.add(proposalId_);
+        $.proposalIds.add(proposalId_);
 
-        _proposal.content = content_;
-        _proposal.proposalEndTime = block.timestamp + duration_;
+        proposal.content = content_;
+        proposal.roots.add($.participantsCMT.getRoot());
 
-        // vote on behalf of the creator
-        // zk validation is processed inside _vote
-        _vote(proposalId_, proofData_);
+        proposal.challenge = challenge_;
+        proposal.encryptionKey = _computeEncryptionKey(challenge_);
+
+        proposal.status = ProposalStatus.VOTING;
+
+        $.cumulativeRotationKey = ED256.pInfinity();
+        $.participantsRotation.clear();
 
         emit ProposalCreated(proposalId_, content_);
 
         return proposalId_;
     }
 
-    function vote(uint256 proposalId_, ZKParams calldata proofData_) external {
-        _vote(proposalId_, proofData_);
+    function vote(VoteParams calldata params_) external {
+        _vote(_getZKMultisigStorage().currentProposalId, params_);
+    }
+
+    function revealAndExecute(uint256 approvalVoteCount_) external payable {
+        uint256 proposalId_ = _getZKMultisigStorage().currentProposalId;
+
+        _reveal(proposalId_, approvalVoteCount_);
+
+        _execute(proposalId_);
+    }
+
+    function reveal(uint256 approvalVoteCount_) external {
+        _reveal(_getZKMultisigStorage().currentProposalId, approvalVoteCount_);
     }
 
     function execute(uint256 proposalId_) external payable {
-        require(
-            getProposalStatus(proposalId_) == ProposalStatus.ACCEPTED,
-            "ZKMultisig: Proposal is not accepted"
-        );
-
-        ProposalData storage _proposal = _proposals[proposalId_];
-
-        require(msg.value == _proposal.content.value, "ZKMultisig: Invalid value");
-
-        _proposal.content.target.functionCallWithValue(
-            _proposal.content.data,
-            _proposal.content.value
-        );
-
-        _proposal.executed = true;
-
-        emit ProposalExecuted(proposalId_);
+        _execute(proposalId_);
     }
 
-    function getParticipantsSMTRoot() external view returns (bytes32) {
-        return _participantsSMT.getRoot();
+    function getRotationKDFMSGToSign(uint256 proposalId_) external view returns (bytes32) {
+        return
+            _hashTypedDataV4(
+                keccak256(abi.encode(KDF_ROTATION_MSG_TYPEHASH, address(this), proposalId_))
+            );
     }
 
-    function getParticipantsSMTProof(
-        bytes32 publicKeyHash_
-    ) external view override returns (SparseMerkleTree.Proof memory) {
-        return _participantsSMT.getProof(publicKeyHash_);
+    function getParticipantsCMTRoot() external view returns (bytes32) {
+        return _getZKMultisigStorage().participantsCMT.getRoot();
+    }
+
+    function getParticipantsCMTProof(
+        uint256 publicKeyHash_,
+        uint32 desiredProofSize_
+    ) external view override returns (CartesianMerkleTree.Proof memory) {
+        return _getZKMultisigStorage().participantsCMT.getProof(publicKeyHash_, desiredProofSize_);
     }
 
     function getParticipantsCount() external view returns (uint256) {
-        return _participants.length();
+        return _getZKMultisigStorage().participantsPermanent.length();
     }
 
-    function getParticipants() external view returns (uint256[] memory) {
-        return _participants.values();
+    function getParticipants()
+        external
+        view
+        returns (ED256.APoint[] memory permanentKeys_, ED256.APoint[] memory rotationKeys_)
+    {
+        ZKMultisigStorage storage $ = _getZKMultisigStorage();
+
+        uint256 permanentKeysCount_ = $.participantsPermanent.length();
+        permanentKeys_ = new ED256.APoint[](permanentKeysCount_);
+
+        for (uint256 i = 0; i < permanentKeysCount_; i++) {
+            permanentKeys_[i] = $.participantPermanentKeys[$.participantsPermanent.at(i)];
+        }
+
+        uint256 rotationKeysCount_ = $.participantsRotation.length();
+        rotationKeys_ = new ED256.APoint[](rotationKeysCount_);
+
+        for (uint256 i = 0; i < rotationKeysCount_; i++) {
+            rotationKeys_[i] = $.participantRotationKeys[$.participantsRotation.at(i)];
+        }
     }
 
     function getProposalsCount() external view returns (uint256) {
-        return _proposalIds.length();
+        return _getZKMultisigStorage().proposalIds.length();
     }
 
     function getProposalsIds(
         uint256 offset,
         uint256 limit
     ) external view override returns (uint256[] memory) {
-        return _proposalIds.part(offset, limit);
+        return _getZKMultisigStorage().proposalIds.part(offset, limit);
     }
 
     function getQuorumPercentage() external view returns (uint256) {
-        return _quorumPercentage;
+        return _getZKMultisigStorage().quorumPercentage;
     }
 
     function getProposalInfo(uint256 proposalId_) external view returns (ProposalInfoView memory) {
-        ProposalData storage _proposal = _proposals[proposalId_];
+        ProposalData storage proposal = _getZKMultisigStorage().proposals[proposalId_];
 
         return
             ProposalInfoView({
-                content: _proposal.content,
-                proposalEndTime: _proposal.proposalEndTime,
-                status: getProposalStatus(proposalId_),
-                votesCount: _proposal.blinders.length(),
+                content: proposal.content,
+                status: proposal.status,
+                votesCount: proposal.blinders.length(),
                 requiredQuorum: getRequiredQuorum()
             });
     }
@@ -183,164 +255,324 @@ contract ZKMultisig is UUPSUpgradeable, IZKMultisig {
         uint256 salt_
     ) public pure returns (uint256) {
         return
-            uint256(keccak256(abi.encode(content_.target, content_.value, content_.data, salt_)));
+            uint256(keccak256(abi.encode(content_.target, content_.value, content_.data, salt_))) %
+            BabyJubJub.curve().p;
     }
 
-    function getProposalChallenge(uint256 proposalId_) public view returns (uint256) {
-        return
-            PoseidonUnit1L.poseidon(
-                [
-                    uint256(
-                        uint248(
-                            uint256(
-                                keccak256(abi.encode(block.chainid, address(this), proposalId_))
-                            )
-                        )
-                    )
-                ]
-            );
+    function getEncryptionKey(uint256 proposalId_) external view returns (ED256.APoint memory) {
+        return _getZKMultisigStorage().proposals[proposalId_].encryptionKey;
+    }
+
+    function getProposalChallenge(uint256 proposalId_) external view returns (uint256) {
+        return _getZKMultisigStorage().proposals[proposalId_].challenge;
     }
 
     function isBlinderVoted(
         uint256 proposalId_,
         uint256 blinderToCheck_
     ) public view returns (bool) {
-        return _proposals[proposalId_].blinders.contains(blinderToCheck_);
+        return _getZKMultisigStorage().proposals[proposalId_].blinders.contains(blinderToCheck_);
     }
 
-    function getProposalStatus(uint256 proposalId_) public view returns (ProposalStatus) {
-        ProposalData storage _proposal = _proposals[proposalId_];
-
-        // Check if the proposal exists by verifying the end time
-        if (_proposal.proposalEndTime == 0) {
-            return ProposalStatus.NONE;
-        }
-
-        // Check if the proposal has been executed
-        if (_proposal.executed) {
-            return ProposalStatus.EXECUTED;
-        }
-
-        // Check if the proposal has met the quorum requirement
-        if (_proposal.blinders.length() >= getRequiredQuorum()) {
-            return ProposalStatus.ACCEPTED;
-        }
-
-        // Check if the proposal is still within the voting period
-        if (_proposal.proposalEndTime > block.timestamp) {
-            return ProposalStatus.VOTING;
-        }
-
-        // If the proposal has not met the quorum and the voting period has expired
-        return ProposalStatus.EXPIRED;
+    function getProposalStatus(uint256 proposalId_) external view returns (ProposalStatus) {
+        return _getZKMultisigStorage().proposals[proposalId_].status;
     }
 
     // return the required quorum amount (not percentage) for a given number of participants
     function getRequiredQuorum() public view returns (uint256) {
+        ZKMultisigStorage storage $ = _getZKMultisigStorage();
+
         return
-            ((_participants.length() * _quorumPercentage) / PERCENTAGE_100).max(MIN_QUORUM_SIZE);
+            (($.participantsPermanent.length() * $.quorumPercentage) / PERCENTAGE_100).max(
+                MIN_QUORUM_SIZE
+            );
+    }
+
+    function poseidon3(bytes32 el1_, bytes32 el2_, bytes32 el3_) public pure returns (bytes32) {
+        return bytes32(PoseidonUnit3L.poseidon([uint256(el1_), uint256(el2_), uint256(el3_)]));
     }
 
     function _authorizeUpgrade(address newImplementation_) internal override onlyThis {}
 
-    function _addParticipants(uint256[] memory participantsToAdd_) internal {
-        require(
-            _participants.length() + participantsToAdd_.length <= 2 ** PARTICIPANTS_TREE_DEPTH,
-            "ZKMultisig: Too many participants"
-        );
+    function _addParticipants(
+        ED256.APoint[] calldata permanentKeys_,
+        ED256.APoint[] calldata rotationKeys_
+    ) internal {
+        uint256 participantsToAdd_ = permanentKeys_.length;
 
-        _processParticipants(participantsToAdd_, true);
-    }
+        if (participantsToAdd_ == 0) revert NoParticipantsToProcess();
+        if (participantsToAdd_ != rotationKeys_.length) revert KeyLenMismatch();
 
-    function _removeParticipants(uint256[] memory participantsToRemove_) internal {
-        _processParticipants(participantsToRemove_, false);
+        ZKMultisigStorage storage $ = _getZKMultisigStorage();
 
-        require(_participants.length() > 0, "ZKMultisig: Cannot remove all participants");
-    }
+        uint256 totalNodesCount_ = $.participantsCMT.getNodesCount() + participantsToAdd_ * 2;
 
-    function _updateQuorumPercentage(uint256 newQuorumPercentage_) internal {
-        require(
-            newQuorumPercentage_ > 0 &&
-                newQuorumPercentage_ <= PERCENTAGE_100 &&
-                newQuorumPercentage_ != _quorumPercentage,
-            "ZKMultisig: Invalid quorum percentage"
-        );
+        if (totalNodesCount_ > 2 ** PARTICIPANTS_TREE_DEPTH) {
+            revert TooManyParticipants(totalNodesCount_);
+        }
 
-        _quorumPercentage = newQuorumPercentage_;
-    }
+        for (uint256 i = 0; i < participantsToAdd_; i++) {
+            uint256 permanentKeyHash_ = PoseidonUnit3L.poseidon(
+                [permanentKeys_[i].x, permanentKeys_[i].y, 1]
+            );
 
-    function _updateParticipantVerifier(address participantVerifier_) internal {
-        require(participantVerifier_ != address(0), "ZKMultisig: Invalid verifier address");
-        require(
-            participantVerifier_ != participantVerifier,
-            "ZKMultisig: The same verifier address"
-        );
-        require(participantVerifier_.code.length > 0, "ZKMultisig: Not a contract");
+            uint256 rotationKeyHash_ = PoseidonUnit3L.poseidon(
+                [rotationKeys_[i].x, rotationKeys_[i].y, 2]
+            );
 
-        participantVerifier = participantVerifier_;
-    }
+            if (!$.participantsPermanent.contains(permanentKeyHash_)) {
+                $.participantsCMT.add(permanentKeyHash_);
+                $.participantsCMT.add(rotationKeyHash_);
 
-    function _vote(uint256 proposalId_, ZKParams calldata proofData_) internal {
-        require(
-            getProposalStatus(proposalId_) == ProposalStatus.VOTING,
-            "ZKMultisig: Proposal is not in voting state"
-        );
+                $.participantsPermanent.add(permanentKeyHash_);
+                $.participantsRotation.add(rotationKeyHash_);
 
-        _validateZKParams(proposalId_, proofData_);
+                $.participantPermanentKeys[permanentKeyHash_] = permanentKeys_[i];
+                $.participantRotationKeys[rotationKeyHash_] = rotationKeys_[i];
 
-        _proposals[proposalId_].blinders.add(proofData_.inputs[0]);
+                $.cumulativePermanentKey = $.cumulativePermanentKey.add(permanentKeys_[i]);
+                $.cumulativeRotationKey = $.cumulativeRotationKey.add(rotationKeys_[i]);
 
-        emit ProposalVoted(proposalId_, proofData_.inputs[0]);
-    }
-
-    function _validateZKParams(uint256 proposalId_, ZKParams calldata proofData_) internal view {
-        require(proofData_.inputs.length == 3, "ZKMultisig: Invalid proof data");
-
-        require(
-            !isBlinderVoted(proposalId_, proofData_.inputs[0]),
-            "ZKMultisig: Blinder already voted"
-        );
-
-        require(
-            proofData_.inputs[1] == getProposalChallenge(proposalId_),
-            "ZKMultisig: Invalid challenge"
-        );
-
-        require(
-            proofData_.inputs[2] == uint256(_participantsSMT.getRoot()),
-            "ZKMultisig: Invalid SMT root"
-        );
-
-        require(
-            participantVerifier.verifyProof(
-                proofData_.inputs,
-                VerifierHelper.ProofPoints({a: proofData_.a, b: proofData_.b, c: proofData_.c})
-            ),
-            "ZKMultisig: Invalid proof"
-        );
-    }
-
-    function _processParticipants(uint256[] memory participants_, bool isAdding_) private {
-        require(participants_.length > 0, "Multisig: No participants to process");
-
-        for (uint256 i = 0; i < participants_.length; i++) {
-            uint256 participant_ = participants_[i];
-
-            if (isAdding_) {
-                if (!_participants.contains(participant_)) {
-                    _participantsSMT.add(bytes32(participant_), participant_);
-                    _participants.add(participant_);
-                }
-            } else {
-                if (_participants.contains(participant_)) {
-                    _participantsSMT.remove(bytes32(participant_));
-                    _participants.remove(participant_);
-                }
+                emit ParticipantAdded(permanentKeys_[i], rotationKeys_[i]);
             }
         }
     }
 
+    function _removeParticipants(ED256.APoint[] calldata permanentKeys_) internal {
+        if (permanentKeys_.length == 0) revert NoParticipantsToProcess();
+
+        ZKMultisigStorage storage $ = _getZKMultisigStorage();
+
+        for (uint256 i = 0; i < permanentKeys_.length; i++) {
+            uint256 permanentKeyHash_ = PoseidonUnit3L.poseidon(
+                [permanentKeys_[i].x, permanentKeys_[i].y, 1]
+            );
+
+            if ($.participantsPermanent.contains(permanentKeyHash_)) {
+                $.participantsCMT.remove(permanentKeyHash_);
+                $.participantsPermanent.remove(permanentKeyHash_);
+                delete $.participantPermanentKeys[permanentKeyHash_];
+
+                $.cumulativePermanentKey = $.cumulativePermanentKey.subA(permanentKeys_[i]);
+
+                emit ParticipantRemoved(permanentKeys_[i]);
+            }
+        }
+
+        if (_getZKMultisigStorage().participantsPermanent.length() == 0) {
+            revert RemovingAllParticipants();
+        }
+    }
+
+    function _updateQuorumPercentage(uint256 newQuorumPercentage_) internal {
+        ZKMultisigStorage storage $ = _getZKMultisigStorage();
+
+        if (
+            newQuorumPercentage_ == 0 ||
+            newQuorumPercentage_ > PERCENTAGE_100 ||
+            newQuorumPercentage_ == $.quorumPercentage
+        ) {
+            revert InvalidQuorum(newQuorumPercentage_);
+        }
+
+        $.quorumPercentage = newQuorumPercentage_;
+    }
+
+    function _updateCreationVerifier(address creationVerifier_) internal {
+        ZKMultisigStorage storage $ = _getZKMultisigStorage();
+
+        _validateVerifier(creationVerifier_, $.creationVerifier);
+
+        $.creationVerifier = creationVerifier_;
+    }
+
+    function _updateVotingVerifier(address votingVerifier_) internal {
+        ZKMultisigStorage storage $ = _getZKMultisigStorage();
+
+        _validateVerifier(votingVerifier_, $.votingVerifier);
+
+        $.votingVerifier = votingVerifier_;
+    }
+
+    function _vote(uint256 proposalId_, VoteParams calldata params_) internal {
+        ZKMultisigStorage storage $ = _getZKMultisigStorage();
+
+        ProposalData storage proposal = $.proposals[proposalId_];
+
+        if (proposal.status != ProposalStatus.VOTING) {
+            revert NotVoting(proposalId_);
+        }
+
+        if ($.rotationKeyNullifiers[params_.keyNullifier]) {
+            revert UsedNullifier(params_.keyNullifier);
+        }
+
+        if (isBlinderVoted(proposalId_, params_.blinder)) {
+            revert UsedBlinder(params_.blinder);
+        }
+
+        if (!proposal.roots.contains(params_.cmtRoot)) {
+            revert InvalidCMTRoot(params_.cmtRoot);
+        }
+
+        $.rotationKeyNullifiers[params_.keyNullifier] = true;
+        proposal.blinders.add(params_.blinder);
+
+        ED256.APoint[2] memory vote_ = abi.decode(params_.encryptedVote, (ED256.APoint[2]));
+
+        _validateVotingZKParams(proposalId_, params_, vote_);
+
+        proposal.aggregatedVotes[0] = proposal.aggregatedVotes[0].add(vote_[0]);
+        proposal.aggregatedVotes[1] = proposal.aggregatedVotes[1].add(vote_[1]);
+
+        proposal.decryptionKey =
+            (proposal.decryptionKey + params_.decryptionKeyShare) %
+            BabyJubJub.curve().n;
+
+        uint256 rotationKeyHash_ = PoseidonUnit3L.poseidon(
+            [params_.rotationKey.x, params_.rotationKey.y, 2]
+        );
+
+        $.participantsCMT.add(rotationKeyHash_);
+        proposal.roots.add($.participantsCMT.getRoot());
+
+        $.participantsRotation.add(rotationKeyHash_);
+        $.participantRotationKeys[rotationKeyHash_] = params_.rotationKey;
+
+        $.cumulativeRotationKey = $.cumulativeRotationKey.add(params_.rotationKey);
+
+        emit ProposalVoted(proposalId_, params_.blinder);
+    }
+
+    function _reveal(uint256 proposalId_, uint256 approvalVoteCount_) internal {
+        ZKMultisigStorage storage $ = _getZKMultisigStorage();
+
+        ProposalData storage proposal = $.proposals[proposalId_];
+
+        ED256.PPoint memory xC1_ = proposal.aggregatedVotes[0].mul(proposal.decryptionKey);
+        ED256.PPoint memory T_ = proposal.aggregatedVotes[1].subP(xC1_);
+
+        if (!T_.verifyScalarMult(approvalVoteCount_)) revert VoteCountMismatch();
+
+        bool isAccepted_ = approvalVoteCount_ >= getRequiredQuorum();
+
+        proposal.status = isAccepted_ ? ProposalStatus.ACCEPTED : ProposalStatus.REJECTED;
+
+        emit ProposalRevealed(proposalId_, isAccepted_);
+    }
+
+    function _execute(uint256 proposalId_) internal {
+        ProposalData storage proposal = _getZKMultisigStorage().proposals[proposalId_];
+
+        if (proposal.status != ProposalStatus.ACCEPTED) {
+            revert ProposalNotAccepted(proposalId_);
+        }
+
+        if (msg.value != proposal.content.value) {
+            revert InvalidValue(msg.value, proposal.content.value);
+        }
+
+        proposal.content.target.functionCallWithValue(
+            proposal.content.data,
+            proposal.content.value
+        );
+
+        proposal.status = ProposalStatus.EXECUTED;
+
+        emit ProposalExecuted(proposalId_);
+    }
+
+    function _computeEncryptionKey(
+        uint256 challenge_
+    ) internal view returns (ED256.APoint memory) {
+        uint256 h1_ = PoseidonUnit1L.poseidon([challenge_]);
+        uint256 h2_ = PoseidonUnit1L.poseidon([h1_]);
+
+        ZKMultisigStorage storage $ = _getZKMultisigStorage();
+
+        return $.cumulativePermanentKey.mul2($.cumulativeRotationKey, h1_, h2_);
+    }
+
+    function _validateVerifier(address verifier_, address actualVerifier_) internal view {
+        if (verifier_ == address(0)) revert ZeroVerifier();
+        if (verifier_ == actualVerifier_) revert DuplicateVerifier();
+        if (verifier_.code.length == 0) revert NotAContract(verifier_);
+    }
+
+    function _validateCreationZKParams(
+        uint256 challenge_,
+        ZKParams calldata proofData_
+    ) internal view {
+        ZKMultisigStorage storage $ = _getZKMultisigStorage();
+
+        uint256[] memory inputs_ = new uint256[](2);
+        inputs_[0] = uint256($.participantsCMT.getRoot());
+        inputs_[1] = challenge_;
+
+        if (
+            !$.creationVerifier.verifyProof(
+                Groth16VerifierHelper.Groth16Proof({
+                    proofPoints: Groth16VerifierHelper.ProofPoints({
+                        a: proofData_.a,
+                        b: proofData_.b,
+                        c: proofData_.c
+                    }),
+                    publicSignals: inputs_
+                })
+            )
+        ) {
+            revert InvalidProof();
+        }
+    }
+
+    function _validateVotingZKParams(
+        uint256 proposalId_,
+        VoteParams calldata params_,
+        ED256.APoint[2] memory vote_
+    ) internal view {
+        ZKMultisigStorage storage $ = _getZKMultisigStorage();
+
+        ProposalData storage proposal = $.proposals[proposalId_];
+
+        uint256[] memory inputs_ = new uint256[](14);
+        inputs_[0] = params_.blinder;
+        inputs_[1] = params_.keyNullifier;
+        inputs_[2] = vote_[0].x;
+        inputs_[3] = vote_[0].y;
+        inputs_[4] = vote_[1].x;
+        inputs_[5] = vote_[1].y;
+        inputs_[6] = params_.rotationKey.x;
+        inputs_[7] = params_.rotationKey.y;
+        inputs_[8] = params_.decryptionKeyShare;
+        inputs_[9] = proposal.encryptionKey.x;
+        inputs_[10] = proposal.encryptionKey.y;
+        inputs_[11] = proposal.challenge;
+        inputs_[12] = proposalId_;
+        inputs_[13] = uint256(params_.cmtRoot);
+
+        if (
+            !$.votingVerifier.verifyProof(
+                Groth16VerifierHelper.Groth16Proof({
+                    proofPoints: Groth16VerifierHelper.ProofPoints({
+                        a: params_.proofData.a,
+                        b: params_.proofData.b,
+                        c: params_.proofData.c
+                    }),
+                    publicSignals: inputs_
+                })
+            )
+        ) {
+            revert InvalidProof();
+        }
+    }
+
     function _validateMsgSender() private view {
-        require(msg.sender == address(this), "ZKMultisig: Not authorized call");
+        if (msg.sender != address(this)) revert NotAuthorizedCall();
+    }
+
+    function _getZKMultisigStorage() private pure returns (ZKMultisigStorage storage $) {
+        assembly {
+            $.slot := ZK_MULTISIG_STORAGE
+        }
     }
 }

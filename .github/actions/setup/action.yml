@@ -8,8 +8,11 @@ runs:
     - name: Setup node
       uses: actions/setup-node@v3
       with:
-        node-version: "16.18.x"
+        node-version: "20.x"
         cache: npm
     - name: Install packages
       run: npm install
+      shell: bash
+    - name: Generate verifiers
+      run: npx hardhat zkit verifiers
       shell: bash
