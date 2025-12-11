@@ -7,7 +7,7 @@ It allows multisig participants to approve or reject proposals anonymously witho
 > [!TIP]
 > Please check out the [original paper](https://ethresear.ch/t/private-multisig-v0-1/23244).
 
-## Key Features
+## Key features
 
 - Anonymous membership via [Cartesian Merkle proofs](https://arxiv.org/pdf/2504.10944).
 - ECC ElGamal encrypted votes with homomorphic ciphertext aggregation.
@@ -23,18 +23,22 @@ It allows multisig participants to approve or reject proposals anonymously witho
 > [!WARNING]
 > This is an unaudited PoC. Use at your own risk.
 
-## Steps to Build the Project
+## Steps to build the project
 
-1. Generate circuit verifiers
+1. Install dependencies
+    ```bash
+    npm install
+    ```
+2. Generate circuit verifiers
     ```bash
     npx hardhat zkit verifiers
     ```
-2. Compile the contracts and run tests:
+3. Compile the contracts and run tests:
     ```bash
     npm run compile
     npm run test
     ```
-3. Deploy the contracts:
+4. Deploy the contracts:
     ```bash
     npm run deploy-sepolia
     ```
