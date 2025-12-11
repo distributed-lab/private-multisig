@@ -1,11 +1,15 @@
 import { ethers, zkit } from "hardhat";
+import { randomBytes } from "crypto";
+
 import { addPoint, Base8, mulPointEscalar, Point } from "@zk-kit/baby-jubjub";
 import { poseidonHash } from "@/test/helpers/poseidon-hash";
-import { ProposalCreation, Voting } from "@/generated-types/zkit";
+
+import { ProposalCreation, ProposalVoting } from "@/generated-types/zkit";
 import { IZKMultisig, ZKMultisigMock } from "@ethers-v6";
+
 import { CartesianMerkleTree, ED256 } from "@/generated-types/ethers/contracts/ZKMultisig";
+
 import ProofStructOutput = CartesianMerkleTree.ProofStructOutput;
-import { randomBytes } from "crypto";
 import APointStruct = ED256.APointStruct;
 
 const proofSize = 40;
@@ -100,7 +104,7 @@ export async function vote(
   const newSk2 = (BigInt(rotationMsg) + sk2) % babyJubJubN;
   const newPk2 = mulPointEscalar(Base8, newSk2);
 
-  const circuit: Voting = await zkit.getCircuit("Voting");
+  const circuit: ProposalVoting = await zkit.getCircuit("ProposalVoting");
 
   const proof = await circuit.generateProof({
     encryptionKey,

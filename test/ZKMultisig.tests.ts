@@ -9,7 +9,7 @@ import { Reverter } from "@/test/helpers/reverter";
 import {
   IZKMultisig,
   ProposalCreationGroth16Verifier,
-  VotingGroth16Verifier,
+  ProposalVotingGroth16Verifier,
   ZKMultisigMock,
   ZKMultisigFactory,
 } from "@ethers-v6";
@@ -38,8 +38,6 @@ import {
   vote,
 } from "@/test/helpers/zk-multisig";
 
-type ProposalContent = IZKMultisig.ProposalContentStruct;
-
 enum ProposalStatus {
   NONE,
   VOTING,
@@ -67,7 +65,7 @@ describe("ZKMultisig", () => {
   let alice: SignerWithAddress;
 
   let creationVerifier: ProposalCreationGroth16Verifier;
-  let votingVerifier: VotingGroth16Verifier;
+  let votingVerifier: ProposalVotingGroth16Verifier;
 
   let zkMultisig: ZKMultisigMock;
   let zkMultisigFactory: ZKMultisigFactory;
@@ -75,13 +73,13 @@ describe("ZKMultisig", () => {
   let initialParticipantsPerm: APointStruct[];
   let initialParticipantsRot: APointStruct[];
 
-  let proposalContent: ProposalContent;
+  let proposalContent: IZKMultisig.ProposalContentStruct;
 
   before(async () => {
     [alice] = await ethers.getSigners();
 
     creationVerifier = await ethers.deployContract("ProposalCreationGroth16Verifier");
-    votingVerifier = await ethers.deployContract("VotingGroth16Verifier");
+    votingVerifier = await ethers.deployContract("ProposalVotingGroth16Verifier");
 
     const zkMultisigImpl = await ethers.deployContract("ZKMultisigMock", {
       libraries: {
