@@ -7,7 +7,6 @@ import { CartesianMerkleTree, ED256 } from "@/generated-types/ethers/contracts/Z
 import ProofStructOutput = CartesianMerkleTree.ProofStructOutput;
 import { randomBytes } from "crypto";
 import APointStruct = ED256.APointStruct;
-import ProposalContent = IZKMultisig.ProposalContentStruct;
 
 const proofSize = 40;
 const inf: Point<bigint> = [0n, 1n];
@@ -17,7 +16,11 @@ export function randomNumber() {
   return BigInt("0x" + randomBytes(32).toString("hex"));
 }
 
-export async function createProposal(zkMultisig: ZKMultisigMock, salt: bigint, content: ProposalContent) {
+export async function createProposal(
+  zkMultisig: ZKMultisigMock,
+  salt: bigint,
+  content: IZKMultisig.ProposalContentStruct,
+) {
   const proposalId = await zkMultisig.computeProposalId(content, salt);
 
   const challengeEncoded = ethers.AbiCoder.defaultAbiCoder().encode(
@@ -42,14 +45,13 @@ export async function createProposal(zkMultisig: ZKMultisigMock, salt: bigint, c
 
   const pi_b = proof.proof.pi_b;
 
-  const zkParams = {
+  const zkParams: IZKMultisig.ZKParamsStruct = {
     a: [proof.proof.pi_a[0], proof.proof.pi_a[1]],
     b: [
       [pi_b[0][1], pi_b[0][0]],
       [pi_b[1][1], pi_b[1][0]],
     ],
     c: [proof.proof.pi_c[0], proof.proof.pi_c[1]],
-    inputs: [proof.publicSignals.cmtRoot, proof.publicSignals.proposalId],
   };
 
   return await zkMultisig.create(content, salt, zkParams);
@@ -62,7 +64,7 @@ export async function vote(
   proposalId: bigint,
   forVote: boolean = true,
   cmtProofRoot?: string,
-  cmtProofs?: ProofStructOutput[2],
+  cmtProofs?: [ProofStructOutput, ProofStructOutput],
 ) {
   const pk1 = mulPointEscalar(Base8, sk1);
   const pk2 = mulPointEscalar(Base8, sk2);
@@ -122,7 +124,7 @@ export async function vote(
   const pi_b = proof.proof.pi_b;
   const pub = proof.publicSignals;
 
-  const zkParams = {
+  const zkParams: IZKMultisig.ZKParamsStruct = {
     a: [proof.proof.pi_a[0], proof.proof.pi_a[1]],
     b: [
       [pi_b[0][1], pi_b[0][0]],
@@ -138,7 +140,7 @@ export async function vote(
     y: newPk2[1],
   };
 
-  const voteParams = {
+  const voteParams: IZKMultisig.VoteParamsStruct = {
     encryptedVote: encodedVote,
     decryptionKeyShare,
     keyNullifier,
@@ -153,7 +155,7 @@ export async function vote(
   return {
     tx,
     decryptionKeyShare,
-    vote: [C1, C2],
+    vote: [C1, C2] as [[bigint, bigint], [bigint, bigint]],
     newSk2,
     newPk2,
   };
@@ -169,7 +171,7 @@ export function aggregateDecryptionKeyShares(keyShares: bigint[]) {
   return sum % babyJubJubN;
 }
 
-export function aggregateVotes(votes: [bigint, bigint][2][]) {
+export function aggregateVotes(votes: [[bigint, bigint], [bigint, bigint]][]) {
   let sumC1 = inf;
   let sumC2 = inf;
 

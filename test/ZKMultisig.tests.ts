@@ -51,14 +51,13 @@ describe("ZKMultisig", () => {
 
   const proofSize = 40;
 
-  const randomZKParams = {
+  const randomZKParams: IZKMultisig.ZKParamsStruct = {
     a: [randomNumber(), randomNumber()],
     b: [
       [randomNumber(), randomNumber()],
       [randomNumber(), randomNumber()],
     ],
     c: [randomNumber(), randomNumber()],
-    inputs: [randomNumber(), randomNumber()],
   };
 
   let alice: SignerWithAddress;
@@ -594,7 +593,7 @@ describe("ZKMultisig", () => {
 
       const pi_b = proof.proof.pi_b;
 
-      const zkParams = {
+      const zkParams: IZKMultisig.ZKParamsStruct = {
         a: [proof.proof.pi_a[0], proof.proof.pi_a[1]],
         b: [
           [pi_b[0][1], pi_b[0][0]],
