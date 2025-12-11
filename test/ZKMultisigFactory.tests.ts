@@ -1,17 +1,20 @@
-import { PRECISION, ZERO_ADDR } from "@/scripts/utils/constants";
-import { Reverter } from "@/test/helpers/reverter";
-import {
-  ERC1967Proxy__factory,
-  ProposalCreationGroth16Verifier,
-  VotingGroth16Verifier,
-  ZKMultisigMock,
-  ZKMultisigFactory,
-} from "@ethers-v6";
 import { SignerWithAddress } from "@nomicfoundation/hardhat-ethers/signers";
 import { expect } from "chai";
 import { randomBytes } from "crypto";
 import { AbiCoder, solidityPacked as encodePacked, keccak256, TypedDataDomain, ZeroAddress } from "ethers";
 import { ethers } from "hardhat";
+
+import { PRECISION, ZERO_ADDR } from "@/scripts/utils/constants";
+import { Reverter } from "@/test/helpers/reverter";
+
+import {
+  ERC1967Proxy__factory,
+  ProposalCreationGroth16Verifier,
+  ProposalVotingGroth16Verifier,
+  ZKMultisigMock,
+  ZKMultisigFactory,
+} from "@ethers-v6";
+
 import { getPoseidon } from "./helpers";
 import { generateParticipants, pointsToArray } from "@/test/helpers/zk-multisig";
 
@@ -21,11 +24,11 @@ describe("ZKMultisigFactory", () => {
   let alice: SignerWithAddress;
 
   let creationVerifier: ProposalCreationGroth16Verifier;
-  let votingVerifier: VotingGroth16Verifier;
+  let votingVerifier: ProposalVotingGroth16Verifier;
   let zkMultisig: ZKMultisigMock;
   let zkMultisigFactory: ZKMultisigFactory;
 
-  const encode = (types: ReadonlyArray<string>, values: ReadonlyArray<any>): string => {
+  const encode = (types: ReadonlyArray<string>, values: ReadonlyArray<string | bigint>): string => {
     return AbiCoder.defaultAbiCoder().encode(types, values);
   };
 
@@ -35,7 +38,7 @@ describe("ZKMultisigFactory", () => {
     [alice] = await ethers.getSigners();
 
     creationVerifier = await ethers.deployContract("ProposalCreationGroth16Verifier");
-    votingVerifier = await ethers.deployContract("VotingGroth16Verifier");
+    votingVerifier = await ethers.deployContract("ProposalVotingGroth16Verifier");
 
     zkMultisig = await ethers.deployContract("ZKMultisigMock", {
       libraries: {

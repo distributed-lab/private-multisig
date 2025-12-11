@@ -7,7 +7,7 @@ include "./babyjubjub/escalarmulany.circom";
 include "@solarity/circom-lib/hasher/poseidon/poseidon.circom";
 include "@solarity/circom-lib/data-structures/CartesianMerkleTree.circom";
 
-template Voting(proofSize) {
+template ProposalVoting(proofSize) {
     signal input decryptionKeyShare;
     signal input encryptionKey[2];
     signal input challenge;
@@ -185,4 +185,11 @@ template Voting(proofSize) {
     C2 <== elgamal.D;
 }
 
-component main {public [decryptionKeyShare, encryptionKey, challenge, proposalId, cmtRoot, decryptionKeyShare]} = Voting(40);
+component main {public [
+    decryptionKeyShare,
+    encryptionKey,
+    challenge,
+    proposalId,
+    cmtRoot,
+    decryptionKeyShare
+]} = ProposalVoting(40);

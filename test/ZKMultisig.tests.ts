@@ -1,5 +1,11 @@
+import { expect } from "chai";
+import { ZeroAddress } from "ethers";
+import { ethers, zkit } from "hardhat";
+import { SignerWithAddress } from "@nomicfoundation/hardhat-ethers/signers";
+
 import { PRECISION, ZERO_ADDR } from "@/scripts/utils/constants";
 import { Reverter } from "@/test/helpers/reverter";
+
 import {
   IZKMultisig,
   ProposalCreationGroth16Verifier,
@@ -7,14 +13,12 @@ import {
   ZKMultisigMock,
   ZKMultisigFactory,
 } from "@ethers-v6";
-import { SignerWithAddress } from "@nomicfoundation/hardhat-ethers/signers";
-import { expect } from "chai";
-import { ethers } from "hardhat";
-import { getPoseidon, poseidonHash } from "./helpers";
+
 import { addPoint, mulPointEscalar } from "@zk-kit/baby-jubjub";
-import { zkit } from "hardhat";
 import { ProposalCreation } from "@zkit";
 import { CartesianMerkleTree, ED256 } from "@/generated-types/ethers/contracts/ZKMultisig";
+
+import { getPoseidon, poseidonHash } from "./helpers";
 import APointStruct = ED256.APointStruct;
 import ProofStructOutput = CartesianMerkleTree.ProofStructOutput;
 import {
@@ -33,7 +37,7 @@ import {
   randomNumber,
   vote,
 } from "@/test/helpers/zk-multisig";
-import { ZeroAddress } from "ethers";
+
 type ProposalContent = IZKMultisig.ProposalContentStruct;
 
 enum ProposalStatus {

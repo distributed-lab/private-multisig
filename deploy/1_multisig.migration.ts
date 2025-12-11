@@ -6,14 +6,14 @@ import {
   ZKMultisigFactory__factory,
   ZKMultisig__factory,
   ProposalCreationGroth16Verifier__factory,
-  VotingGroth16Verifier__factory,
+  ProposalVotingGroth16Verifier__factory,
 } from "@ethers-v6";
 
 export = async (deployer: Deployer) => {
   await deployPoseidons(deployer, [1, 3]);
 
   const creationVerifier = await deployer.deploy(ProposalCreationGroth16Verifier__factory);
-  const votingVerifier = await deployer.deploy(VotingGroth16Verifier__factory);
+  const votingVerifier = await deployer.deploy(ProposalVotingGroth16Verifier__factory);
 
   const multisig = await deployer.deploy(ZKMultisig__factory);
   const factory = await deployer.deploy(ZKMultisigFactory__factory);
